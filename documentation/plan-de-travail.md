@@ -42,13 +42,13 @@ Découpage en 8 epics. Chaque tâche est dimensionnée pour ≤ une demi-journé
 
 *Couvre l'étape 1 de l'énoncé. Aucune dépendance.*
 
-- **P7-1.1** Initialiser le repo Git, créer `.gitignore` Python complet (`__pycache__/`, `.venv/`, `.env`, `data/raw/`, `data/index/`, `*.pyc`, `.pytest_cache/`)
-- **P7-1.2** Définir l'arborescence cible : `src/` (logique métier), `api/` (FastAPI), `scripts/` (build index, ingestion), `tests/`, `data/`, `documentation/`, `evaluation/`
-- **P7-1.3** Créer le `requirements.txt` avec versions pinnées : `faiss-cpu`, `langchain`, `langchain-community`, `langchain-ollama`, `sentence-transformers` (embeddings HF), `requests`, `pandas`, `python-dotenv`, `fastapi`, `uvicorn`, `pydantic`
-- **P7-1.4** Créer `requirements-dev.txt` : `pytest`, `pytest-cov`, `httpx` (test API), `ragas`, `datasets`, `ruff` ou `black`
-- **P7-1.5** Rédiger un `README.md` minimal de bootstrap (création venv, install, variables d'env attendues — pour l'instant juste un placeholder)
-- **P7-1.6** Smoke-test : script `scripts/check_env.py` qui importe `faiss`, `langchain`, `sentence_transformers`, vérifie que Ollama répond sur `localhost:11434`
-- **P7-1.7** Documenter dans le README l'installation de **Ollama** + commande `ollama pull mistral` (pré-requis local hors `pip install`)
+- **P7-1.1** Initialiser le repo Git et créer un `.gitignore` couvrant Python (caches, venv), uv (cache mais pas le lockfile), données régénérables (`data/raw/`, `data/index/`, etc.), secrets (`.env`) et OS
+- **P7-1.2** Initialiser le projet uv (`uv init --bare --python 3.12`), pinner Python via `.python-version`, resserrer `requires-python = ">=3.12,<3.13"` dans le `pyproject.toml`, puis créer l'arborescence cible : `src/` (logique métier, sous-packages `data/`, `indexing/`, `rag/`), `api/` (FastAPI), `scripts/`, `tests/`, `data/`, `documentation/`, `evaluation/`
+- **P7-1.3** Ajouter les dépendances runtime via `uv add` : `faiss-cpu`, `langchain`, `langchain-community`, `langchain-ollama`, `sentence-transformers` (embeddings HF), `requests`, `pandas`, `python-dotenv`, `fastapi`, `uvicorn[standard]`, `pydantic`. Le `pyproject.toml` et le `uv.lock` sont les sources de vérité — l'export `requirements.txt` est reporté en fin de projet (livrable).
+- **P7-1.4** Ajouter les dépendances dev via `uv add --dev` (groupe `[dependency-groups] dev` du PEP 735) : `pytest`, `pytest-cov`, `httpx` (test API), `ragas`, `datasets`, `ruff`
+- **P7-1.5** Rédiger un `README.md` minimal de bootstrap : objectifs du projet, prérequis (Python 3.12, uv, Ollama), procédure d'install (`uv sync` suffit), commandes principales (`uv run pytest`, `uv run uvicorn …`)
+- **P7-1.6** Smoke-test : script `scripts/check_env.py` qui importe `faiss`, `langchain`, `sentence_transformers`, vérifie que Ollama répond sur `localhost:11434`. À lancer via `uv run python scripts/check_env.py`.
+- **P7-1.7** Documenter dans le README l'installation de **Ollama** + commande `ollama pull mistral` (prérequis local hors `uv sync`)
 
 ---
 

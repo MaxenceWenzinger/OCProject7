@@ -1,0 +1,15 @@
+Lien vers un repo Github contenant : 
+
+    Un système RAG fonctionnel.
+
+    Une API REST (FastAPI ou Flask) exposant le système.
+
+    Un rapport technique (PDF ou README) documentant l’architecture, les choix technologiques, les modèles utilisés, les résultats observés et les pistes d’amélioration.
+
+    Des tests unitaires et un jeu de test annoté.
+
+Pour la soutenance : 
+
+    Une présentation PowerPoint (10 à 15 slides) présentant le fonctionnement du système, les résultats, et les perspectives.
+
+    Une démo live d’utilisation de l’API.

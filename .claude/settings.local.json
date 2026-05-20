@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls \"C:\\\\Users\\\\maxou\\\\.claude\\\\projects\\\\d--WSVSCode-OCProject7\\\\memory\\\\\" 2>/dev/null; echo \"---\"; ls \"C:\\\\Users\\\\maxou\\\\.claude\\\\projects\\\\d--WSVSCode-OCProject7\\\\\" 2>/dev/null)",
+      "Read(//c/Users/maxou/.claude/projects/d--WSVSCode-OCProject7/memory\" 2>/dev/**)",
+      "Bash(cmd /c \"dir C:\\\\Users\\\\maxou\\\\.claude\\\\projects\\\\d--WSVSCode-OCProject7\\\\memory 2>nul && echo --- && dir C:\\\\Users\\\\maxou\\\\.claude\\\\projects\\\\d--WSVSCode-OCProject7 2>nul\")",
+      "Bash(where uv *)",
+      "Bash(uv --version)"
+    ]
+  }
+}

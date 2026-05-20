@@ -1,0 +1,105 @@
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+.eggs/
+build/
+dist/
+wheels/
+pip-wheel-metadata/
+
+# ---------------------------------------------------------------------------
+# Environnements virtuels
+# ---------------------------------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+
+# ---------------------------------------------------------------------------
+# uv
+# ---------------------------------------------------------------------------
+# uv.lock
+.uv-cache/
+
+# ---------------------------------------------------------------------------
+# Tests, lint, type-checking, couverture
+# ---------------------------------------------------------------------------
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+
+# ---------------------------------------------------------------------------
+# Notebooks Jupyter
+# ---------------------------------------------------------------------------
+.ipynb_checkpoints/
+
+# ---------------------------------------------------------------------------
+# Secrets et configuration locale
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+
+# ---------------------------------------------------------------------------
+# Données et artefacts du projet (lourds, régénérables)
+# ---------------------------------------------------------------------------
+# Données brutes Open Agenda et données intermédiaires : régénérables via le
+# script d'ingestion, pas la peine de polluer le repo.
+data/raw/
+data/interim/
+data/processed/
+
+# Index FAISS : reconstructible via scripts/rebuild_index.py.
+data/index/
+*.faiss
+*.pkl
+
+# Résultats des runs d'évaluation Ragas : régénérables ; on garde uniquement
+# le dataset annoté (committed) et éventuellement le rapport final.
+evaluation/results/
+
+# Modèles téléchargés en local (HuggingFace cache, modèles Ollama).
+.cache/
+models/
+
+# ---------------------------------------------------------------------------
+# IDE et éditeurs
+# ---------------------------------------------------------------------------
+# VSCode : on n'ignore PAS .vscode/ entièrement — on pourrait vouloir partager
+# tasks.json / launch.json plus tard. Mais settings.json est souvent personnel.
+.vscode/settings.json
+.vscode/*.log
+.idea/
+*.swp
+*.swo
+
+# ---------------------------------------------------------------------------
+# Système d'exploitation
+# ---------------------------------------------------------------------------
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ---------------------------------------------------------------------------
+# Divers
+# ---------------------------------------------------------------------------
+*.log

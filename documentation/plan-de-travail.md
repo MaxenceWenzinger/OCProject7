@@ -2,10 +2,10 @@
 
 ## Résumé du projet
 
-Livrer un **POC de chatbot RAG** pour Puls-Events, capable de répondre à des questions sur les événements culturels d'**Île-de-France** récupérés depuis l'API **Open Agenda** (≤ 1 an d'historique + événements à venir). Le système combine :
+Livrer un **POC de chatbot RAG** pour Puls-Events, capable de répondre à des questions sur les événements culturels en **France entière** récupérés depuis l'API **Open Agenda** (toutes dates, ~1 M d'événements après filtrage qualité — scope élargi par rapport à l'énoncé, validé avec le professeur). Le système combine :
 
 - **FAISS** (CPU) comme base vectorielle
-- **Mistral local via Ollama** pour la génération (pas d'API cloud → démo offline)
+- **Mistral-small local via Ollama** pour la génération (pas d'API cloud → démo offline)
 - **LangChain** pour orchestrer la chaîne RAG
 - **FastAPI** pour exposer `/ask` et `/rebuild`, avec Swagger auto sur `/docs`
 - **Docker** pour packager l'API pour la démo locale
@@ -38,30 +38,30 @@ Découpage en 8 epics. Chaque tâche est dimensionnée pour ≤ une demi-journé
 
 ---
 
-### EPIC 1 — Initialisation du projet et environnement reproductible
+### EPIC 1 — Initialisation du projet et environnement reproductible ✅
 
-*Couvre l'étape 1 de l'énoncé. Aucune dépendance.*
+*Couvre l'étape 1 de l'énoncé. Aucune dépendance. **Livré.***
 
-- **P7-1.1** Initialiser le repo Git et créer un `.gitignore` couvrant Python (caches, venv), uv (cache mais pas le lockfile), données régénérables (`data/raw/`, `data/index/`, etc.), secrets (`.env`) et OS
-- **P7-1.2** Initialiser le projet uv (`uv init --bare --python 3.12`), pinner Python via `.python-version`, resserrer `requires-python = ">=3.12,<3.13"` dans le `pyproject.toml`, puis créer l'arborescence cible : `src/` (logique métier, sous-packages `data/`, `indexing/`, `rag/`), `api/` (FastAPI), `scripts/`, `tests/`, `data/`, `documentation/`, `evaluation/`
-- **P7-1.3** Ajouter les dépendances runtime via `uv add` : `faiss-cpu`, `langchain`, `langchain-community`, `langchain-ollama`, `sentence-transformers` (embeddings HF), `requests`, `pandas`, `python-dotenv`, `fastapi`, `uvicorn[standard]`, `pydantic`. Le `pyproject.toml` et le `uv.lock` sont les sources de vérité — l'export `requirements.txt` est reporté en fin de projet (livrable).
-- **P7-1.4** Ajouter les dépendances dev via `uv add --dev` (groupe `[dependency-groups] dev` du PEP 735) : `pytest`, `pytest-cov`, `httpx` (test API), `ragas`, `datasets`, `ruff`
-- **P7-1.5** Rédiger un `README.md` minimal de bootstrap : objectifs du projet, prérequis (Python 3.12, uv, Ollama), procédure d'install (`uv sync` suffit), commandes principales (`uv run pytest`, `uv run uvicorn …`)
-- **P7-1.6** Smoke-test : script `scripts/check_env.py` qui importe `faiss`, `langchain`, `sentence_transformers`, vérifie que Ollama répond sur `localhost:11434`. À lancer via `uv run python scripts/check_env.py`.
-- **P7-1.7** Documenter dans le README l'installation de **Ollama** + commande `ollama pull mistral` (prérequis local hors `uv sync`)
+- [x] **P7-1.1** Initialiser le repo Git et créer un `.gitignore` couvrant Python (caches, venv), uv (cache mais pas le lockfile), données régénérables (`data/raw/`, `data/index/`, etc.), secrets (`.env`) et OS
+- [x] **P7-1.2** Initialiser le projet uv (`uv init --bare --python 3.12`), pinner Python via `.python-version`, resserrer `requires-python = ">=3.12,<3.13"` dans le `pyproject.toml`, puis créer l'arborescence cible : `src/` (logique métier, sous-packages `data/`, `indexing/`, `rag/`), `api/` (FastAPI), `scripts/`, `tests/`, `data/`, `documentation/`, `evaluation/`
+- [x] **P7-1.3** Ajouter les dépendances runtime via `uv add` : `faiss-cpu`, `langchain`, `langchain-community`, `langchain-ollama`, `sentence-transformers` (embeddings HF), `requests`, `pandas`, `python-dotenv`, `fastapi`, `uvicorn[standard]`, `pydantic`. Le `pyproject.toml` et le `uv.lock` sont les sources de vérité — l'export `requirements.txt` est reporté en fin de projet (livrable).
+- [x] **P7-1.4** Ajouter les dépendances dev via `uv add --dev` (groupe `[dependency-groups] dev` du PEP 735) : `pytest`, `pytest-cov`, `httpx` (test API), `ragas`, `datasets`, `ruff`
+- [x] **P7-1.5** Rédiger un `README.md` minimal de bootstrap : objectifs du projet, prérequis (Python 3.12, uv, Ollama), procédure d'install (`uv sync` suffit), commandes principales (`uv run pytest`, `uv run uvicorn …`)
+- [x] **P7-1.6** Smoke-test : script `scripts/check_env.py` qui importe `faiss`, `langchain`, `sentence_transformers`, vérifie que Ollama répond sur `localhost:11434`. À lancer via `uv run python scripts/check_env.py`.
+- [x] **P7-1.7** Documenter dans le README l'installation de **Ollama** + commande `ollama pull mistral-small` (prérequis local hors `uv sync`)
 
 ---
 
-### EPIC 2 — Ingestion et préparation des données Open Agenda
+### EPIC 2 — Ingestion et préparation des données Open Agenda ✅
 
-*Couvre l'étape 2. Dépend de l'Epic 1.*
+*Couvre l'étape 2. Dépend de l'Epic 1. **Livré.***
 
-- **P7-2.1** Explorer l'API Open Agenda (endpoint `public.opendatasoft.com`, dataset `evenements-publics-openagenda`) — un notebook jetable `notebooks/01_explore_openagenda.ipynb` ou script — pour identifier les champs disponibles, la structure des réponses, la pagination, les filtres géographiques
-- **P7-2.2** Écrire `scripts/fetch_openagenda.py` : récupère les événements filtrés par région Île-de-France et fenêtre temporelle [aujourd'hui − 1 an ; aujourd'hui + 1 an], gestion de la pagination, sauvegarde brute en `data/raw/events_<date>.jsonl`
-- **P7-2.3** Gérer les limites de l'API (rate-limit, taille max par requête, retries avec backoff exponentiel)
-- **P7-2.4** Écrire `src/data/clean.py` : nettoyage (HTML strip sur les descriptions, dédup, suppression événements sans description ou sans date, normalisation des champs `title`/`description`/`location`/`startDate`/`endDate`/`keywords`)
-- **P7-2.5** Test unitaire `tests/test_clean.py` : vérifie le strip HTML, la dédup, le rejet des entrées invalides sur un mini-fixture
-- **P7-2.6** Documenter dans `documentation/data.md` la source, les filtres appliqués, les champs retenus, la taille du dataset final
+- [x] **P7-2.1** Explorer l'API Open Agenda (endpoint `public.opendatasoft.com`, dataset `evenements-publics-openagenda`) — `scripts/explore_openagenda.py` (script plutôt que notebook, plus simple à versionner et ré-exécuter) — schéma, volumétrie, distribution temporelle, smoke test endpoint export. Synthèse complète dans `documentation/data.md`.
+- [x] **P7-2.2** `scripts/fetch_openagenda.py` : streaming depuis l'endpoint `/exports/jsonl` (et non `/exports/json` initialement prévu — `jsonl` permet un vrai streaming ligne par ligne sans charger 1 M d'objets en RAM). Scope élargi à **France entière + toutes dates** (décision projet validée par le professeur). Filtres `where=` côté API : `country_fr="France (Métropole)"` + `description_fr IS NOT NULL`. **Résultat : 1 051 298 events, 2,16 GB, 12 min.**
+- [x] **P7-2.3** Retries + backoff exponentiel via `urllib3.Retry` (5 tentatives, backoff 0/2/4/8/16 s, sur 429/5xx + erreurs réseau). Écriture atomique `.tmp` → rename. Inclus dans `fetch_openagenda.py`.
+- [x] **P7-2.4** `src/data/clean.py` (fonctions pures) + `scripts/clean_events.py` (wrapper streaming). Pipeline : strip HTML (BeautifulSoup), normalisation espaces, gestion `list` (`keywords_fr`/`accessibility_label_fr`), suppression surrogates Unicode isolés, parsing JSON imbriqué `attendancemode` → enum `attendance_mode`, dérivation `event_year`, validation, dédup sur `(title, date, location_name)`. Drop des champs `country_fr` (constant) et `category` (null à 100 %). **Résultat : 1 015 695 events conservés (96,6 %), 1,65 GB, 4 min 30 s.** Bonus non prévu : `scripts/measure_duplicates.py` pour mesurer 4 variantes de clé de dédup avant de trancher.
+- [x] **P7-2.5** `tests/test_clean.py` — **37 tests** couvrant strip HTML, normalisation, gestion listes, surrogates, parsing attendancemode, validation, dédup, et un scénario bout-en-bout sur mini-fixture inline.
+- [x] **P7-2.6** `documentation/data.md` finalisé : source, filtres, schéma des 23 champs retenus + 1 dérivé, qualité du dataset, distribution temporelle, pipeline de cleaning, chiffres finaux.
 
 ---
 
@@ -79,11 +79,11 @@ Découpage en 8 epics. Chaque tâche est dimensionnée pour ≤ une demi-journé
 
 ---
 
-### EPIC 4 — Chaîne RAG (LangChain + Mistral local)
+### EPIC 4 — Chaîne RAG (LangChain + Mistral-small local)
 
 *Couvre l'étape 4. Dépend de l'Epic 3.*
 
-- **P7-4.1** Wrapper Ollama dans LangChain via `langchain_ollama.ChatOllama` (modèle `mistral`) — fonction `get_llm()` dans `src/rag/llm.py`
+- **P7-4.1** Wrapper Ollama dans LangChain via `langchain_ollama.ChatOllama` (modèle `mistral-small`) — fonction `get_llm()` dans `src/rag/llm.py`
 - **P7-4.2** Écrire `src/rag/chain.py` : chaîne RAG (retriever FAISS top-k + prompt template + LLM). Utiliser LCEL (`prompt | llm | parser`) plutôt que les anciennes `RetrievalQA`
 - **P7-4.3** Rédiger le prompt système en français : rôle assistant culturel, consigne d'utiliser uniquement le contexte fourni, format de réponse attendu, comportement si aucun événement pertinent (« je n'ai pas trouvé d'événement correspondant »)
 - **P7-4.4** Encapsuler dans une classe `RAGService` (init coûteux = chargement index + LLM une seule fois, méthode `answer(question: str) -> dict` qui renvoie réponse + sources)
@@ -159,7 +159,8 @@ Parallélisable :
 
 ## Risques identifiés à surveiller
 
-- **Open Agenda** : qualité variable des descriptions, événements en double, champs manquants → prévoir du temps sur le cleaning
+- **~~Open Agenda~~** ✅ matérialisé et géré en Epic 2 : ~3 % de doublons sémantiques, ~7 % hors-France à filtrer, HTML omniprésent dans `longdescription_fr`, champs `list` au lieu de `str` sur certains, surrogates Unicode corrompus, `category` null à 100 %. Tout est traité dans `clean.py` (cf. `documentation/data.md`).
+- **Volume de l'index (nouveau risque, Epic 3)** : avec le scope élargi à France entière + toutes dates, on a ~1 M d'événements à embedder. Sur CPU avec un modèle multilingue HuggingFace, ça peut représenter **plusieurs heures** de calcul à la première construction. À surveiller : envisager `rebuild_index.py` long mais re-runnable, ou un échantillonnage pour les tests Epic 3, avec un full build une fois la pipeline validée.
 - **Ollama en Docker** : la connexion `host.docker.internal` ne fonctionne pas pareil sur Linux vs Windows/Mac → tester tôt sur la machine cible de la démo
 - **CI sans Ollama** : ne pas découvrir le dernier jour que Ragas tente d'appeler le LLM en CI sans avoir prévu de fallback
 - **Démo live** : toujours avoir un plan B (capture vidéo de la démo qui marche) si un imprévu réseau survient

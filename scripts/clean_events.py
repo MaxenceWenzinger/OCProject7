@@ -33,7 +33,15 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.data.clean import clean_event, dedup_key, is_valid  # noqa: E402
+from src.data.clean import (  # noqa: E402
+    MIN_LAST_DATE,
+    VALID_YEAR_MAX,
+    VALID_YEAR_MIN,
+    clean_event,
+    dedup_key,
+    is_valid,
+    last_relevant_date,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -58,7 +66,8 @@ def latest_raw_file() -> Path:
 
 
 def _invalid_reason(event: dict) -> str:
-    """Pourquoi un event a été rejeté (pour les stats)."""
+    """Pourquoi un event a été rejeté (pour les stats). L'ordre suit la
+    séquence de tests de `is_valid` dans src/data/clean.py."""
     if not event.get("title_fr"):
         return "no_title"
     if not event.get("description_fr"):
@@ -66,7 +75,14 @@ def _invalid_reason(event: dict) -> str:
     year = event.get("event_year")
     if year is None:
         return "no_year"
-    return "year_out_of_range"
+    if not (VALID_YEAR_MIN <= year <= VALID_YEAR_MAX):
+        return "year_out_of_range"
+    last_date = last_relevant_date(event)
+    if last_date is None:
+        return "no_end_date"
+    if last_date < MIN_LAST_DATE:
+        return "event_too_old"
+    return "unknown"
 
 
 def clean_stream(input_path: Path, output_path: Path) -> dict[str, int]:

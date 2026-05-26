@@ -2,7 +2,7 @@
 
 ## Résumé du projet
 
-Livrer un **POC de chatbot RAG** pour Puls-Events, capable de répondre à des questions sur les événements culturels en **France entière** récupérés depuis l'API **Open Agenda** (toutes dates, ~1 M d'événements après filtrage qualité — scope élargi par rapport à l'énoncé, validé avec le professeur). Le système combine :
+Livrer un **POC de chatbot RAG** pour Puls-Events, capable de répondre à des questions sur les événements culturels en **France entière** récupérés depuis l'API **Open Agenda**. On garde uniquement les événements dont la dernière occurrence se termine en **2025 ou après** (les événements purement passés sont écartés) — soit ~253 k events sur les ~1 M du dataset brut. Scope élargi par rapport à l'énoncé (France entière vs IDF), recentré ensuite sur les événements actuels et futurs, validé avec le professeur. Le système combine :
 
 - **FAISS** (CPU) comme base vectorielle
 - **Mistral-small local via Ollama** pour la génération (pas d'API cloud → démo offline)
@@ -47,8 +47,7 @@ Découpage en 8 epics. Chaque tâche est dimensionnée pour ≤ une demi-journé
 - [x] **P7-1.3** Ajouter les dépendances runtime via `uv add` : `faiss-cpu`, `langchain`, `langchain-community`, `langchain-ollama`, `sentence-transformers` (embeddings HF), `requests`, `pandas`, `python-dotenv`, `fastapi`, `uvicorn[standard]`, `pydantic`. Le `pyproject.toml` et le `uv.lock` sont les sources de vérité — l'export `requirements.txt` est reporté en fin de projet (livrable).
 - [x] **P7-1.4** Ajouter les dépendances dev via `uv add --dev` (groupe `[dependency-groups] dev` du PEP 735) : `pytest`, `pytest-cov`, `httpx` (test API), `ragas`, `datasets`, `ruff`
 - [x] **P7-1.5** Rédiger un `README.md` minimal de bootstrap : objectifs du projet, prérequis (Python 3.12, uv, Ollama), procédure d'install (`uv sync` suffit), commandes principales (`uv run pytest`, `uv run uvicorn …`)
-- [x] **P7-1.6** Smoke-test : script `scripts/check_env.py` qui importe `faiss`, `langchain`, `sentence_transformers`, vérifie que Ollama répond sur `localhost:11434`. À lancer via `uv run python scripts/check_env.py`.
-- [x] **P7-1.7** Documenter dans le README l'installation de **Ollama** + commande `ollama pull mistral-small` (prérequis local hors `uv sync`)
+- [x] **P7-1.6** Documenter dans le README l'installation de **Ollama** + commande `ollama pull mistral-small` (prérequis local hors `uv sync`)
 
 ---
 
@@ -56,26 +55,27 @@ Découpage en 8 epics. Chaque tâche est dimensionnée pour ≤ une demi-journé
 
 *Couvre l'étape 2. Dépend de l'Epic 1. **Livré.***
 
-- [x] **P7-2.1** Explorer l'API Open Agenda (endpoint `public.opendatasoft.com`, dataset `evenements-publics-openagenda`) — `scripts/explore_openagenda.py` (script plutôt que notebook, plus simple à versionner et ré-exécuter) — schéma, volumétrie, distribution temporelle, smoke test endpoint export. Synthèse complète dans `documentation/data.md`.
-- [x] **P7-2.2** `scripts/fetch_openagenda.py` : streaming depuis l'endpoint `/exports/jsonl` (et non `/exports/json` initialement prévu — `jsonl` permet un vrai streaming ligne par ligne sans charger 1 M d'objets en RAM). Scope élargi à **France entière + toutes dates** (décision projet validée par le professeur). Filtres `where=` côté API : `country_fr="France (Métropole)"` + `description_fr IS NOT NULL`. **Résultat : 1 051 298 events, 2,16 GB, 12 min.**
-- [x] **P7-2.3** Retries + backoff exponentiel via `urllib3.Retry` (5 tentatives, backoff 0/2/4/8/16 s, sur 429/5xx + erreurs réseau). Écriture atomique `.tmp` → rename. Inclus dans `fetch_openagenda.py`.
-- [x] **P7-2.4** `src/data/clean.py` (fonctions pures) + `scripts/clean_events.py` (wrapper streaming). Pipeline : strip HTML (BeautifulSoup), normalisation espaces, gestion `list` (`keywords_fr`/`accessibility_label_fr`), suppression surrogates Unicode isolés, parsing JSON imbriqué `attendancemode` → enum `attendance_mode`, dérivation `event_year`, validation, dédup sur `(title, date, location_name)`. Drop des champs `country_fr` (constant) et `category` (null à 100 %). **Résultat : 1 015 695 events conservés (96,6 %), 1,65 GB, 4 min 30 s.** Bonus non prévu : `scripts/measure_duplicates.py` pour mesurer 4 variantes de clé de dédup avant de trancher.
-- [x] **P7-2.5** `tests/test_clean.py` — **37 tests** couvrant strip HTML, normalisation, gestion listes, surrogates, parsing attendancemode, validation, dédup, et un scénario bout-en-bout sur mini-fixture inline.
-- [x] **P7-2.6** `documentation/data.md` finalisé : source, filtres, schéma des 23 champs retenus + 1 dérivé, qualité du dataset, distribution temporelle, pipeline de cleaning, chiffres finaux.
+- [x] **P7-2.1** `scripts/fetch_openagenda.py` : streaming depuis l'endpoint `/exports/jsonl` (et non `/exports/json` initialement prévu — `jsonl` permet un vrai streaming ligne par ligne sans charger 1 M d'objets en RAM). Scope élargi à **France entière** (décision projet validée par le professeur ; le filtre temporel « 2025+ » est appliqué plus tard, au cleaning, pour rester libre d'itérer dessus sans re-télécharger). Filtres `where=` côté API : `country_fr="France (Métropole)"` + `description_fr IS NOT NULL`. **Résultat : 1 051 298 events, 2,16 GB, 12 min.**
+- [x] **P7-2.2** Retries + backoff exponentiel via `urllib3.Retry` (5 tentatives, backoff 0/2/4/8/16 s, sur 429/5xx + erreurs réseau). Écriture atomique `.tmp` → rename. Inclus dans `fetch_openagenda.py`.
+- [x] **P7-2.3** `src/data/clean.py` (fonctions pures) + `scripts/clean_events.py` (wrapper streaming). Pipeline : strip HTML (BeautifulSoup), normalisation espaces, gestion `list` (`keywords_fr`/`accessibility_label_fr`), suppression surrogates Unicode isolés, parsing JSON imbriqué `attendancemode` → enum `attendance_mode`, dérivation `event_year`, validation (titre/description/année/filtre temporel `lastdate_end ≥ 2025-01-01` avec fallback `firstdate_end`), dédup sur `(title, date, location_name)`. Drop des champs `country_fr` (constant) et `category` (null à 100 %). **Résultat : 252 901 events conservés (24,1 %), 401 MB, 4 min 6 s.**
+- [x] **P7-2.4** `tests/test_clean.py` — **48 tests** couvrant strip HTML, normalisation, gestion listes, surrogates, parsing attendancemode, validation, filtre temporel (lastdate_end + fallback firstdate_end), dédup, et un scénario bout-en-bout sur mini-fixture inline.
+- [x] **P7-2.5** `documentation/data.md` finalisé : source, filtres, schéma des 23 champs retenus + 1 dérivé, qualité du dataset, distribution temporelle, pipeline de cleaning, chiffres finaux.
 
 ---
 
-### EPIC 3 — Indexation vectorielle FAISS
+### EPIC 3 — Indexation vectorielle FAISS ✅
 
-*Couvre l'étape 3. Dépend de l'Epic 2.*
+*Couvre l'étape 3. Dépend de l'Epic 2. **Livré.***
 
-- **P7-3.1** Choisir et justifier la stratégie de chunking : événement entier vs. chunks de description. Pour des événements courts, 1 événement = 1 document est probablement suffisant — à valider sur la distribution des longueurs
-- **P7-3.2** Écrire `src/indexing/build_index.py` : transforme les événements nettoyés en `langchain.schema.Document` avec `page_content` (titre + description + mots-clés) et `metadata` (date, lieu, URL source, id événement)
-- **P7-3.3** Intégrer le modèle d'embedding **HuggingFace** local (`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` ou `intfloat/multilingual-e5-base` — multilingue car données en français) via `HuggingFaceEmbeddings`
-- **P7-3.4** Construire l'index FAISS (`FAISS.from_documents`) et le sérialiser dans `data/index/` (`index.faiss` + `index.pkl`)
-- **P7-3.5** Écrire `scripts/rebuild_index.py` : pipeline complet fetch → clean → index, idempotent, ré-exécutable
-- **P7-3.6** Test unitaire `tests/test_indexing.py` : sur un fixture de 5 événements, vérifie que l'index se construit, contient le bon nombre de docs, et qu'une recherche par mot-clé connu remonte le bon événement en top-1
-- **P7-3.7** Test de sanity manuel : 3 requêtes en français (« concert jazz », « exposition peinture », « théâtre Molière ») → vérifier la pertinence des top-5
+- [x] **P7-3.1** Profilage des longueurs sur le dataset clean (`scripts/profile_lengths.py`) : médiane 169 tokens, P95 411, max 2 541 — 2,5 % d'events dépassent 512 tokens. Sur recommandation du mentor, on bascule sur **parent-child chunking** : chaque event est découpé en N chunks ≤ 120 tokens (MiniLM) avec recouvrement 24 tokens, indexés séparément, dédupliqués par `parent_uid` au retrieval.
+- [x] **P7-3.2** `src/indexing/build_documents.py` : `build_page_content` (concat titre/description/longdescription/keywords/conditions avec préfixes), `build_metadata` (10 champs : uid, title, url, dates, lieu, attendance_mode, event_year), `event_to_document` (parent Document complet), `event_to_chunks` (découpage tokenisé MiniLM avec recouvrement, metadata enrichie `parent_uid`+`chunk_index`). 24 tests dans `tests/test_build_documents.py` couvrant chaque fonction, **fake tokenizer** `_CharTokenizer` pour ne pas charger MiniLM en test unitaire.
+- [x] **P7-3.3** Modèle d'embedding retenu : `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` (384 dim, fenêtre 128 tokens). Choix arbitré par benchmark (`scripts/benchmark_embeddings.py`) : MiniLM ~9× plus rapide qu'e5-base sur CPU et viable malgré sa fenêtre courte grâce au parent-child. Dépendance ajoutée : `langchain-huggingface`.
+- [x] **P7-3.4** `scripts/build_index.py` : streaming jsonl → chunking → embedding par batchs de 5 000 → `FAISS.from_documents` puis `add_documents` → sauvegarde atomique `.tmp/` → swap. **Résultat : 252 901 events → 579 652 chunks indexés en 1h 42m, ~1,5 GB sur disque** (`index.faiss` 890 MB + `index.pkl` 395 MB + `parent_store.pkl` 289 MB).
+- [x] **P7-3.5** Test d'intégration `tests/test_indexing.py` : sur un mini-fixture de 5 events thématiquement distincts (jazz, peinture, théâtre, randonnée, cuisine), exécute la chaîne complète (modèle MiniLM réel + FAISS réel dans un `tmp_path`) et vérifie (1) les 3 fichiers produits, (2) `db.index.ntotal == n_chunks`, (3) parent_store complet, (4) chaque requête mot-clé remonte le bon event en top-1 après dédup parent. **9 tests, ~41 s** (chargement modèle inclus). Marqué `@pytest.mark.slow` pour permettre `pytest -m "not slow"` (boucle de dev rapide en 0,14 s).
+- [x] **P7-3.6** Sanity manuel après le build du 26 mai : 5 requêtes en français lancées sur l'index final (« concert de jazz à Paris », « exposition de peinture contemporaine », « spectacle pour enfants pendant les vacances », « visite guidée du château de Versailles », « festival de musique en plein air été 2026 »). Résultats pertinents sur 4/5 requêtes, signal que le filtrage par metadata (ville/date) sera à câbler dans la chaîne RAG en Epic 4. Détails dans `documentation/data.md`.
+
+**Tâche initialement prévue, sciemment écartée** :
+- ~~`scripts/rebuild_index.py` (pipeline complet fetch → clean → index)~~ — décision projet : on garde les trois scripts séparés (`fetch_openagenda.py`, `clean_events.py`, `build_index.py`) et on documente leur enchaînement dans le README. Pas de wrapper, parce que le contexte « projet étudiant » ne justifie pas la complexité supplémentaire (idempotence, flags `--skip-*`, gestion d'état). Endpoint `POST /rebuild` de l'API (Epic 5) appellera directement `build_index.py` sur le clean le plus récent.
 
 ---
 
@@ -99,7 +99,7 @@ Découpage en 8 epics. Chaque tâche est dimensionnée pour ≤ une demi-journé
 - **P7-5.1** Squelette FastAPI dans `api/main.py` : app, route racine `/` health-check, configuration CORS minimale
 - **P7-5.2** Schémas Pydantic dans `api/schemas.py` : `AskRequest { question: str }`, `AskResponse { answer: str, sources: list[Source] }`, `Source { title, date, url }`
 - **P7-5.3** Endpoint `POST /ask` : injecte le `RAGService` (singleton via `lifespan` FastAPI pour éviter de recharger l'index à chaque requête), gestion d'erreur question vide → 422
-- **P7-5.4** Endpoint `POST /rebuild` : déclenche `scripts/rebuild_index.py` (en arrière-plan via `BackgroundTasks` pour ne pas bloquer la réponse) — noter dans la doc qu'en prod il faudrait protéger cet endpoint
+- **P7-5.4** Endpoint `POST /rebuild` : déclenche `scripts/build_index.py` (en arrière-plan via `BackgroundTasks` pour ne pas bloquer la réponse) sur le clean le plus récent. Noter dans la doc qu'en prod il faudrait protéger cet endpoint et éventuellement précéder par un fetch+clean (les trois scripts sont exécutables manuellement à la chaîne, cf. README).
 - **P7-5.5** Test fonctionnel `tests/test_api.py` avec `httpx.AsyncClient` : `/ask` répond 200 sur question valide, 422 sur question vide, présence du champ `sources`
 - **P7-5.6** Vérifier la doc Swagger générée sur `/docs` et compléter les descriptions de routes / exemples Pydantic pour qu'elle soit présentable en démo
 
@@ -160,7 +160,7 @@ Parallélisable :
 ## Risques identifiés à surveiller
 
 - **~~Open Agenda~~** ✅ matérialisé et géré en Epic 2 : ~3 % de doublons sémantiques, ~7 % hors-France à filtrer, HTML omniprésent dans `longdescription_fr`, champs `list` au lieu de `str` sur certains, surrogates Unicode corrompus, `category` null à 100 %. Tout est traité dans `clean.py` (cf. `documentation/data.md`).
-- **Volume de l'index (nouveau risque, Epic 3)** : avec le scope élargi à France entière + toutes dates, on a ~1 M d'événements à embedder. Sur CPU avec un modèle multilingue HuggingFace, ça peut représenter **plusieurs heures** de calcul à la première construction. À surveiller : envisager `rebuild_index.py` long mais re-runnable, ou un échantillonnage pour les tests Epic 3, avec un full build une fois la pipeline validée.
+- **~~Volume de l'index~~** ✅ matérialisé et géré en Epic 3 : ~253 k events → 579 652 chunks (parent-child) embeddés en 1h 42m sur CPU avec MiniLM. Index final ~1,5 GB sur disque, chargement ~15 s, latence retrieval ~50 ms par requête. Conforme au budget mémoire d'une API FastAPI.
 - **Ollama en Docker** : la connexion `host.docker.internal` ne fonctionne pas pareil sur Linux vs Windows/Mac → tester tôt sur la machine cible de la démo
 - **CI sans Ollama** : ne pas découvrir le dernier jour que Ragas tente d'appeler le LLM en CI sans avoir prévu de fallback
 - **Démo live** : toujours avoir un plan B (capture vidéo de la démo qui marche) si un imprévu réseau survient

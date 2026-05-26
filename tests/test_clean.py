@@ -21,6 +21,7 @@ from src.data.clean import (
     dedup_key,
     extract_year,
     is_valid,
+    last_relevant_date,
     normalize_whitespace,
     parse_attendance_mode,
     strip_html,
@@ -73,8 +74,8 @@ class TestNormalizeWhitespace:
         assert normalize_whitespace("foo\n\tbar") == "foo bar"
 
     def test_empty_becomes_none(self):
-        # Validé en planning : une chaîne vide après nettoyage = None
-        # (préserve la distinction null vs vide en aval)
+        # Une chaîne vide après nettoyage devient None pour préserver la
+        # distinction null vs vide en aval.
         assert normalize_whitespace("   ") is None
         assert normalize_whitespace("") is None
 
@@ -151,6 +152,7 @@ class TestIsValid:
         "title_fr": "Concert de jazz",
         "description_fr": "Un super concert",
         "event_year": 2024,
+        "lastdate_end": "2025-06-15T22:00:00+00:00",  # se termine en 2025 → gardé
     }
 
     def test_valid_event(self):
@@ -172,9 +174,84 @@ class TestIsValid:
         assert is_valid({**self.BASE, "event_year": 2503}) is False
         assert is_valid({**self.BASE, "event_year": 2009}) is False  # juste sous le seuil
 
-    def test_accepts_edges(self):
+    def test_accepts_year_edges(self):
         assert is_valid({**self.BASE, "event_year": 2010}) is True
         assert is_valid({**self.BASE, "event_year": 2030}) is True
+
+
+# ---------------------------------------------------------------------------
+# last_relevant_date et règle temporelle (>= 2025-01-01)
+# ---------------------------------------------------------------------------
+
+class TestLastRelevantDate:
+    def test_prefers_lastdate_end(self):
+        ev = {
+            "lastdate_end": "2025-06-15T22:00:00+00:00",
+            "firstdate_end": "2020-01-01T00:00:00+00:00",
+        }
+        assert last_relevant_date(ev) == "2025-06-15T22:00:00+00:00"
+
+    def test_falls_back_on_firstdate_end(self):
+        ev = {
+            "lastdate_end": None,
+            "firstdate_end": "2025-03-10T18:00:00+00:00",
+        }
+        assert last_relevant_date(ev) == "2025-03-10T18:00:00+00:00"
+
+    def test_returns_none_when_both_missing(self):
+        ev = {"lastdate_end": None, "firstdate_end": None}
+        assert last_relevant_date(ev) is None
+
+    def test_returns_none_when_keys_absent(self):
+        assert last_relevant_date({}) is None
+
+
+class TestIsValidTemporalFilter:
+    """Règle dédiée : on ne garde que les événements dont la dernière
+    occurrence se termine en 2025 ou après (avec fallback sur firstdate_end)."""
+
+    BASE: dict = {
+        "title_fr": "Concert",
+        "description_fr": "desc",
+        "event_year": 2024,  # année de début passée, OK
+    }
+
+    def test_accepts_lastdate_end_in_2025(self):
+        ev = {**self.BASE, "lastdate_end": "2025-01-01T00:00:00+00:00"}
+        assert is_valid(ev) is True
+
+    def test_accepts_lastdate_end_in_future(self):
+        ev = {**self.BASE, "lastdate_end": "2026-12-31T23:59:00+00:00"}
+        assert is_valid(ev) is True
+
+    def test_rejects_lastdate_end_in_2024(self):
+        ev = {**self.BASE, "lastdate_end": "2024-12-31T23:59:00+00:00"}
+        assert is_valid(ev) is False
+
+    def test_rejects_lastdate_end_in_far_past(self):
+        ev = {**self.BASE, "lastdate_end": "2018-06-15T22:00:00+00:00"}
+        assert is_valid(ev) is False
+
+    def test_fallback_firstdate_end_used_when_lastdate_end_missing(self):
+        # lastdate_end manquant → on retombe sur firstdate_end qui est en 2025 → OK
+        ev = {
+            **self.BASE,
+            "lastdate_end": None,
+            "firstdate_end": "2025-06-01T20:00:00+00:00",
+        }
+        assert is_valid(ev) is True
+
+    def test_fallback_firstdate_end_rejects_if_too_old(self):
+        ev = {
+            **self.BASE,
+            "lastdate_end": None,
+            "firstdate_end": "2023-06-01T20:00:00+00:00",
+        }
+        assert is_valid(ev) is False
+
+    def test_rejects_when_both_dates_missing(self):
+        ev = {**self.BASE, "lastdate_end": None, "firstdate_end": None}
+        assert is_valid(ev) is False
 
 
 # ---------------------------------------------------------------------------
@@ -272,15 +349,16 @@ class TestDedupKey:
 # ---------------------------------------------------------------------------
 
 def test_end_to_end_filtering_and_dedup():
-    """Mini-fixture qui simule le pipeline complet : 5 events bruts dont on
+    """Mini-fixture qui simule le pipeline complet : 6 events bruts dont on
     attend 2 conservés après cleaning + dédup."""
     raw_events = [
-        # 1) valide
+        # 1) valide : se termine en 2025
         {
             "uid": "a",
             "title_fr": "Concert jazz",
             "description_fr": "soirée",
             "firstdate_begin": "2024-06-15T20:00:00+00:00",
+            "lastdate_end": "2025-06-15T22:00:00+00:00",
             "location_name": "Bataclan",
             "longdescription_fr": "<p>Foo</p>",
             "attendancemode": '{"id": 1, "label": {"fr": "Sur place"}}',
@@ -291,6 +369,7 @@ def test_end_to_end_filtering_and_dedup():
             "title_fr": "Concert jazz",
             "description_fr": "Variante",
             "firstdate_begin": "2024-06-15T20:00:00+00:00",
+            "lastdate_end": "2025-06-15T22:00:00+00:00",
             "location_name": "Bataclan",
             "longdescription_fr": "<p>Bar</p>",
         },
@@ -300,6 +379,7 @@ def test_end_to_end_filtering_and_dedup():
             "title_fr": None,
             "description_fr": "x",
             "firstdate_begin": "2024-06-15T20:00:00+00:00",
+            "lastdate_end": "2025-06-15T22:00:00+00:00",
         },
         # 4) invalide : année aberrante
         {
@@ -307,13 +387,24 @@ def test_end_to_end_filtering_and_dedup():
             "title_fr": "Vieux truc",
             "description_fr": "x",
             "firstdate_begin": "1900-01-01T00:00:00+00:00",
+            "lastdate_end": "2025-01-01T00:00:00+00:00",
         },
-        # 5) valide, différent du 1
+        # 5) invalide : événement purement passé (terminé en 2024)
+        {
+            "uid": "f",
+            "title_fr": "Festival 2024",
+            "description_fr": "édition passée",
+            "firstdate_begin": "2024-06-01T00:00:00+00:00",
+            "lastdate_end": "2024-09-30T22:00:00+00:00",
+            "location_name": "Quelque part",
+        },
+        # 6) valide, différent du 1 (utilise le fallback firstdate_end)
         {
             "uid": "e",
             "title_fr": "Expo peinture",
             "description_fr": "vernissage",
             "firstdate_begin": "2025-03-01T18:00:00+00:00",
+            "firstdate_end": "2025-09-01T18:00:00+00:00",
             "location_name": "Musée d'Orsay",
         },
     ]

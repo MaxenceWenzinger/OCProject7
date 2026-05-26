@@ -52,7 +52,7 @@ TEXT_FIELDS: tuple[str, ...] = (
 # Champs qu'on retire activement à l'entrée si le raw les contient encore
 # (ancien raw d'avant qu'on les sorte du select=). country_fr est constant
 # ("France (Métropole)") par construction du filtre where=, et category est
-# null à 100 % dans le snapshot Opendatasoft.
+# null à 100 % dans le dataset (vérifié sur 1 051 298 lignes).
 DROPPED_FIELDS: tuple[str, ...] = ("country_fr", "category")
 
 ATTENDANCE_MAP: dict[int, str] = {
@@ -61,10 +61,15 @@ ATTENDANCE_MAP: dict[int, str] = {
     3: "mixte",
 }
 
-# Fenêtre temporelle plausible : on filtre les années aberrantes vues en P7-2.1
-# (1900, 23, 2503, 2032...). Les events 2027–2030 sont rares mais légitimes.
+# Fenêtre temporelle plausible : on filtre les années aberrantes vues lors du
+# profilage (1900, 23, 2503, 2032...). Les events 2027–2030 sont rares mais
+# légitimes.
 VALID_YEAR_MIN = 2010
 VALID_YEAR_MAX = 2030
+
+# On ne garde que les événements dont la dernière occurrence se termine
+# en 2025 ou après — autrement dit, on écarte les événements purement passés.
+MIN_LAST_DATE = "2025-01-01"
 
 _WHITESPACE_RE = re.compile(r"\s+")
 
@@ -85,9 +90,9 @@ def strip_html(text: str | None) -> str | None:
 
 
 def normalize_whitespace(text: str | list | None) -> str | None:
-    """Collapse les espaces multiples et trim. Préserve None mais transforme
-    une chaîne devenue vide après nettoyage en None (cohérent avec le choix
-    'garder null' validé en planning).
+    """Collapse les espaces multiples et trim. Préserve None ; une chaîne
+    devenue vide après nettoyage devient None aussi, pour préserver la
+    distinction « pas de donnée » vs « donnée vide » en aval.
 
     Certains champs Open Agenda (`keywords_fr`, `accessibility_label_fr`)
     arrivent sous forme de liste de strings — on les joint avec ", "."""
@@ -123,9 +128,19 @@ def extract_year(iso_datetime: str | None) -> int | None:
         return None
 
 
+def last_relevant_date(event: dict[str, Any]) -> str | None:
+    """Retourne la date à utiliser pour juger si un événement est encore
+    pertinent. On préfère `lastdate_end` (fin de la dernière occurrence),
+    avec fallback sur `firstdate_end` si la première est absente.
+    Renvoie la date sous forme ISO string, ou None si les deux manquent.
+    """
+    return event.get("lastdate_end") or event.get("firstdate_end")
+
+
 def is_valid(event: dict[str, Any]) -> bool:
     """Garde-fou final : on rejette les events sans titre, sans description
-    utilisable, ou avec une date aberrante.
+    utilisable, avec une date de début aberrante, ou dont la dernière
+    occurrence se termine avant `MIN_LAST_DATE` (événement purement passé).
 
     Note : on ne rejette PAS sur l'absence de longdescription_fr — beaucoup
     d'events n'ont qu'une description courte et c'est OK (~10,7 % des events
@@ -138,6 +153,11 @@ def is_valid(event: dict[str, Any]) -> bool:
     if year is None:
         return False
     if not (VALID_YEAR_MIN <= year <= VALID_YEAR_MAX):
+        return False
+    last_date = last_relevant_date(event)
+    if last_date is None:
+        return False
+    if last_date < MIN_LAST_DATE:
         return False
     return True
 

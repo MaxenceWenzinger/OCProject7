@@ -1,19 +1,22 @@
 # Source de données — Open Agenda
 
 Documentation de référence sur les données utilisées par le POC : source,
-filtres, schéma des champs retenus, pipeline de nettoyage et chiffres du
-dataset final. Produit au fil de l'Epic 2 (tâches P7-2.1 à P7-2.6).
+filtres, schéma des champs retenus, pipeline de nettoyage, stratégie de
+chunking et chiffres de l'index FAISS final. Produit au fil des Epics 2
+(ingestion et cleaning) et 3 (indexation vectorielle).
 
 ## Dataset retenu
 
 - **Nom** : `evenements-publics-openagenda`
 - **Plateforme** : `public.opendatasoft.com` (instance publique Opendatasoft, pas d'authentification)
 - **Éditeur** : OpenAgenda
-- **Dernière mise à jour du dataset** : **2024-04-08** — *attention : le dataset
-  agrège les déclarations des organisateurs, et le snapshot Opendatasoft n'a pas
-  été rafraîchi depuis avril 2024. Conséquence : pas d'événements ajoutés depuis,
-  mais le dataset contient déjà des événements déclarés dont la date est en 2025
-  ou 2026.*
+- **Métadonnée `modified` du catalog Opendatasoft** : **2024-04-08**.
+  *⚠ Cette valeur est trompeuse* : la distribution des `updatedat` côté API
+  montre que **161 093 events ont été mis à jour en 2025** et **148 003 en
+  2026** — le dataset est donc activement entretenu, contrairement à ce que
+  laisse penser le champ `modified` du catalog. On ne sait pas pourquoi
+  Opendatasoft ne met pas ce champ à jour (bug ou interprétation
+  différente), mais on travaille bien sur un dataset vivant.
 - **Volume total** : **1 126 911** événements
 - **Couverture géographique** : majoritairement France métropolitaine
   (1 055 315 events, soit **93,6 %**). Le reste est principalement DOM-TOM et
@@ -25,11 +28,16 @@ Volontaire écart à l'énoncé, validé par le professeur (cf. mémoire projet
 `project-stack`) :
 
 - **Géographie** : France entière, pas de filtre régional.
-- **Temps** : pas de filtre temporel, ni à l'ingestion ni au retrieval. Le
-  chatbot peut donc être interrogé sur événements passés comme à venir.
+- **Temps** : on ne garde que les événements dont la dernière occurrence se
+  termine en **2025 ou après**. Autrement dit : les événements purement passés
+  (terminés en 2024 ou avant) sont écartés. Ce critère est appliqué dans le
+  cleaning, sur `lastdate_end` avec fallback sur `firstdate_end`. Pas de
+  filtre au retrieval — les événements peuvent avoir commencé en 2024 ou avant
+  tant qu'ils sont encore en cours ou à venir.
 
-Conséquence : on indexe potentiellement l'intégralité du dataset (après filtrage
-qualité), pas un sous-ensemble géographique ou temporel.
+Conséquence : ~25 % du dataset brut est retenu (les ¾ sont des événements
+historiques). Le POC se concentre sur les événements actuels et futurs, ce
+qui est la valeur métier prioritaire pour un assistant culturel.
 
 ## Champs disponibles (56 au total)
 
@@ -47,11 +55,11 @@ Sélection des champs retenus pour le RAG, regroupés par usage prévisionnel.
 
 | Champ | Type | Note |
 |---|---|---|
-| `title_fr` | text | titre en français, **systématiquement présent** |
-| `description_fr` | text | résumé court, **sans HTML** d'après l'échantillon — null sur ~1,0 % des records |
-| `longdescription_fr` | text | description longue, **contient du HTML** (`<p>`, `<br/>`, `<em>`...) — null sur ~10,7 % des records |
-| `keywords_fr` | text | mots-clés ; **souvent null** d'après l'échantillon (à confirmer en 2.2) |
-| `conditions_fr` | text | conditions de participation, accès, etc. |
+| `title_fr` | text | titre en français, **systématiquement présent** (médiane 41 chars, max 150) |
+| `description_fr` | text | résumé court, **sans HTML** — null sur ~1,0 % des records, plafonné à 200 chars par Open Agenda |
+| `longdescription_fr` | text | description longue, **contient du HTML** (`<p>`, `<br/>`, `<em>`...) — null sur ~10,7 % des records, médiane 498 chars / max ~10 000 |
+| `keywords_fr` | list[text] | mots-clés sous forme de liste ; présent sur ~61 % des events (dataset filtré) |
+| `conditions_fr` | text | conditions de participation, accès, etc. ; présent sur ~38 % des events (dataset filtré) |
 
 ### Dates (utiles pour metadata + filtrage qualité)
 
@@ -90,7 +98,11 @@ Tout ce qui concerne l'image (`image`, `thumbnail`, `originalimage`,
 `onlineaccesslink`). Ces champs peuvent rester dans le `raw` mais ne seront
 pas embarqués dans l'index.
 
-## Distribution temporelle (firstdate_begin)
+## Distribution temporelle du raw (firstdate_begin)
+
+Cette distribution porte sur le dataset **brut** (1 051 298 events) avant
+l'application du filtre temporel du cleaning. Elle reste utile pour montrer
+la couverture historique disponible côté Open Agenda.
 
 | Année | Nombre d'événements |
 |---|---:|
@@ -120,10 +132,12 @@ pertinent sans tricher avec la date système. Les années aberrantes (1900, 23,
 |---|---:|---|
 | `description_fr` NULL | 11 515 (~1,0 %) | Marginal — events à supprimer |
 | `longdescription_fr` NULL | 121 037 (~10,7 %) | On utilise `description_fr` en fallback |
-| Hors France métropolitaine | 71 596 (~6,4 %) | À filtrer si on veut un assistant strictement France métropole |
-| HTML dans `longdescription_fr` | Confirmé sur l'échantillon | Strip HTML obligatoire en 2.4 |
-| Dates aberrantes | < 1 % | Filtrer events dont l'année tombe hors [2010, 2030] par exemple |
-| Doublons | À mesurer en 2.4 sur `uid` et `(title_fr, firstdate_begin, location_name)` | — |
+| Hors France métropolitaine | 71 596 (~6,4 %) | Filtré côté API via `where=` |
+| HTML dans `longdescription_fr` | Confirmé sur tout le dataset | Strip HTML appliqué au cleaning |
+| Dates aberrantes (1900, 2503, ...) | ~2 300 (< 1 %) | Filtré au cleaning (fenêtre [2010, 2030]) |
+| Doublons stricts par `uid` | 0 | OpenAgenda garantit l'unicité |
+| Doublons sémantiques par `(title, firstdate_begin, location_name)` | 33 643 (~3,2 % du raw) | Filtré au cleaning, réduit à ~5 400 après filtre temporel |
+| `uid` unique sur 1 051 298 records | confirmé | RAS |
 
 ## Téléchargement effectué (P7-2.2)
 
@@ -147,7 +161,7 @@ GET https://public.opendatasoft.com/api/explore/v2.1/catalog/datasets/
 
 `country_fr` et `category` sont volontairement absents du `select=` :
 le premier est constant par construction (filtre `where=`), le second est
-null à 100 % dans le snapshot Opendatasoft d'avril 2024.
+null à 100 % dans le dataset (vérifié sur les 1 051 298 lignes téléchargées).
 
 Caractéristiques retenues :
 
@@ -162,9 +176,8 @@ Caractéristiques retenues :
 - `country_fr = "France (Métropole)"` (élimine ~6,4 % hors-périmètre).
 - `description_fr IS NOT NULL` (élimine ~1 % de bruit).
 
-Pas de filtre temporel à l'ingestion : le filtrage des dates aberrantes est
-reporté en 2.4 pour ne pas se priver d'événements 2025–2027 ni d'historique
-récent.
+Pas de filtre temporel à l'ingestion : le filtrage temporel (événements
+purement passés) et celui des dates aberrantes sont reportés au cleaning.
 
 ### Résultats du run du 2026-05-21
 
@@ -177,18 +190,14 @@ récent.
 | Champs par enregistrement | 23 (cohérent avec le `select=`) |
 
 Le volume final correspond à 1 055 315 (events France métropole) − ~4 000
-(events sans description) = 1 051 298. Cohérent avec les sondages 2.1.
+(events sans description) = 1 051 298. Cohérent avec les sondages
+d'exploration.
 
-La taille (2,16 GB) est bien plus élevée que mon estimation initiale
-(~30 MB) — les `longdescription_fr` HTML pèsent en moyenne **~2 KB par
-événement**. Conséquences :
-
-- `data/raw/` est de toute façon gitignored, donc pas de pollution du repo.
-- Le cleaning (2.4) devra strip le HTML, ce qui réduira significativement
-  la taille (~30–50 % en moins probablement).
-- Pour l'indexation FAISS (Epic 3), c'est le **nombre de documents** (1 M)
-  qui dimensionne le temps d'embedding, pas la taille brute. À ré-évaluer
-  une fois le cleaning fait.
+La taille (2,16 GB) est plus élevée que l'estimation initiale (~30 MB) :
+les `longdescription_fr` HTML pèsent en moyenne **~2 KB par événement**.
+Note pratique : `data/raw/` est gitignored, donc pas de pollution du repo.
+Le strip HTML appliqué au cleaning réduit la taille de ~24 % avant même
+le filtre temporel (cf. section suivante).
 
 ### Robustesse
 
@@ -227,45 +236,53 @@ Le pipeline de nettoyage (`src/data/clean.py`, wrapper
    l'écriture UTF-8 si laissés.
 6. **Parsing de `attendancemode`** (JSON imbriqué) → champ dérivé
    `attendance_mode: "sur_place" | "en_ligne" | "mixte" | None`. Champ
-   également exposé en *metadata only* dans Epic 3 (pas dans le
-   `page_content` embeddé, vu sa quasi-monomodalité — cf. décision P7-2.2).
+   exposé en *metadata only* à l'indexation, pas dans le `page_content`
+   embeddé : 98,8 % des events sont « sur_place », inclure cette valeur
+   quasi-constante dans le texte indexé diluerait les embeddings sans
+   apporter de signal discriminant.
 7. **Champ dérivé `event_year`** extrait de `firstdate_begin`.
-8. **Validation** : rejet des événements sans titre, sans description, ou
+8. **Validation** : rejet des événements sans titre, sans description,
    d'année hors `[2010, 2030]` (filtre les aberrations type 1900, 23,
-   2503, 2032 vues en P7-2.1).
+   2503, 2032), ou dont la dernière occurrence se termine avant 2025
+   (événements purement passés). La règle temporelle utilise `lastdate_end`
+   avec fallback sur `firstdate_end` ; les events sans aucune des deux
+   sont également rejetés.
 
-La **déduplication** suit la clé décidée en P7-2.4 :
+La **déduplication** utilise la clé
 `(title_fr_lower, firstdate_begin, location_name_lower)`. On garde la
 première occurrence ; les ~47 events sans l'un des 3 champs sont conservés
-sans comparaison. Cf. `scripts/measure_duplicates.py` pour la mesure de
-référence ayant guidé ce choix.
+sans comparaison. `scripts/measure_duplicates.py` documente la mesure de
+référence (4 stratégies de clé comparées) qui a guidé ce choix.
 
 ### Résultats du run du 2026-05-21
 
 | Étape | Volume | Δ |
 |---|---:|---:|
 | Raw d'entrée | 1 051 298 | — |
-| Invalides (titre/description/année) | − 2 337 | −0,2 % |
+| Invalides | − 792 972 | −75,4 % |
+| ↳ dont `event_too_old` (terminés avant 2025) | − 790 629 | |
 | ↳ dont `year_out_of_range` | − 2 290 | |
 | ↳ dont `no_year` | − 47 | |
-| Doublons (clé D2) | − 33 266 | −3,2 % |
-| **Conservés** | **1 015 695** | **96,6 %** |
+| ↳ dont `no_end_date` (les 2 dates de fin null) | − 6 | |
+| Doublons (clé D2) | − 5 425 | −0,5 % |
+| **Conservés** | **252 901** | **24,1 %** |
 
 | Mesure | Valeur |
 |---|---:|
 | Fichier produit | `data/processed/events_clean_2026-05-21.jsonl` |
-| Taille | **1,65 GB** (vs 2,16 GB raw → −24 % grâce au strip HTML et au drop de `country_fr`) |
-| Durée | **4 min 27 s** |
+| Taille | **401 MB** (vs 2,16 GB raw → −81 % grâce au strip HTML, au drop de `country_fr` et au filtre temporel) |
+| Durée | **4 min 6 s** |
 | Champs par event | 24 (23 du raw + `event_year`, `attendancemode` remplacé par `attendance_mode`) |
 
 ### Distribution finale
 
-- **`attendance_mode`** : 1 003 796 sur place (98,8 %), 5 929 en ligne (0,6 %),
-  5 751 mixte (0,6 %), 219 inconnu.
-- **`event_year`** (top 5) : 2024 (162k), 2023 (160k), 2025 (151k),
-  2022 (127k), 2026 (100k). Couverture concentrée sur 2022–2026, avec un
-  long historique 2010–2021 qui apporte des cas type « Journées du
-  Patrimoine récurrentes ».
+- **`event_year`** (date de début, top 6) : 2025 (151k), 2026 (100k),
+  2024 (666), 2023 (144), 2027 (131), 2022 (86). Les events <2025 conservés
+  sont ceux dont une occurrence se prolonge en 2025+ (récurrents, expos
+  longues, festivals pluri-annuels).
+- **`last_relevant_date`** (date de fin, top 5) : 2025 (151k), 2026 (102k),
+  2027 (195), 2028 (20), >2030 (~20). Quelques events s'étalent jusqu'en
+  2049-2052 (expositions de longue durée).
 
 ### Reproduire le cleaning
 
@@ -282,7 +299,8 @@ Par défaut prend le `events_*.jsonl` le plus récent dans `data/raw/` et
 `tests/test_clean.py` couvre les comportements de `src.data.clean` :
 strip HTML + entités, normalisation des espaces, gestion des listes
 (`keywords_fr`), surrogates Unicode, parsing `attendancemode`,
-extraction d'année, validation, clé de dédup, et un scénario
+extraction d'année, validation, **filtre temporel** (`lastdate_end`
+avec fallback sur `firstdate_end`), clé de dédup, et un scénario
 bout-en-bout sur mini-fixture qui simule le pipeline complet
 (rejet + dédup).
 
@@ -290,16 +308,170 @@ bout-en-bout sur mini-fixture qui simule le pipeline complet
 uv run pytest tests/test_clean.py -v
 ```
 
-37 tests, ~0,1 s.
+48 tests, ~0,1 s.
 
-## Reproduire l'exploration
+## Indexation FAISS (Epic 3) — stratégie et chiffres
 
-```bash
-uv run python scripts/explore_openagenda.py
+### Choix du modèle d'embedding
+
+- **Modèle retenu** : `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`
+  - Multilingue (fr/en/...), 384 dimensions, fenêtre max **128 tokens**
+  - Léger (~118 MB), rapide à l'inférence (~10 ms par requête sur CPU)
+- **Modèle écarté** : `intfloat/multilingual-e5-base`
+  - Plus gros (~280 MB), 768 dim, fenêtre 512 tokens
+  - Benchmark CPU : 10,6 events/s vs 96,6 pour MiniLM (~9× plus lent)
+  - Aurait été nécessaire **sans** parent-child chunking pour éviter la
+    troncature des 2,5 % d'events qui dépassent 512 tokens. Le parent-child
+    rend MiniLM viable car chaque chunk fait <128 tokens par construction.
+
+Les deux modèles ont été benchmarkés via `scripts/benchmark_embeddings.py`
+sur 100 events. Trace conservée pour reproduction.
+
+### Stratégie de chunking : parent-child
+
+Au lieu d'indexer un Document par event, on découpe chaque event en
+**N chunks de ≤ 120 tokens MiniLM** (marge de 8 tokens sous la limite 128
+pour les tokens spéciaux `[CLS]`/`[SEP]`) avec un **recouvrement de
+24 tokens** (20 %).
+
+À l'inférence :
+
+- la similarity search retourne des chunks
+- on dédoublonne par `parent_uid` (un même event peut produire plusieurs
+  chunks proches d'une question)
+- on récupère le Document **parent** complet (page_content + metadata
+  intacts) via un `parent_store: dict[uid → Document]` chargé en RAM
+- on passe les parents au LLM en génération
+
+Bénéfices :
+
+- retrieval précis sur les détails enfouis dans la longdescription
+  (qui seraient invisibles avec un seul embedding par event tronqué à 128
+  tokens)
+- MiniLM utilisable malgré sa fenêtre courte (cf. ci-dessus)
+- build relativement rapide (1h42 vs 6h30 pour Option A + e5-base)
+
+Coût : ~30 lignes de code de jointure parent supplémentaires dans la chaîne
+RAG (Epic 4), index plus gros (~1,5 GB total sur disque).
+
+### Format des Documents
+
+**`page_content`** d'un event (`build_page_content` dans
+`src/indexing/build_documents.py`) :
+
+```
+{title_fr}
+
+{description_fr}
+
+{longdescription_fr}
+
+Mots-clés : {keywords_fr}
+
+Conditions : {conditions_fr}
 ```
 
-Le script affiche schéma + volumétrie + distribution + smoke test
-`/exports/json`, et écrit un échantillon de 20 événements bruts dans
-`data/raw/sample_events.json` (non versionné — `data/raw/` est gitignored).
-Cet échantillon sert de fixture pour développer le nettoyage en 2.4 et son
-test en 2.5 sans avoir à retélécharger le dataset complet.
+Champs absents omis. Pas de préfixe répété dans les chunks : titre et
+description courte se retrouvent automatiquement dans le 1er chunk par
+construction.
+
+**`metadata`** d'un Document parent (10 champs) :
+
+| Clé | Source | Usage prévu |
+|---|---|---|
+| `uid` | `uid` du clean | identification / dédup |
+| `title` | `title_fr` | affichage dans les sources de la réponse API |
+| `url` | `canonicalurl` | lien vers la page Open Agenda d'origine |
+| `first_date` | `firstdate_begin` | affichage + filtrage retrieval futur |
+| `last_date` | `lastdate_end` (fallback `firstdate_end`) | affichage + filtrage |
+| `location_name` | `location_name` | affichage |
+| `location_city` | `location_city` | affichage + filtrage géo |
+| `location_region` | `location_region` | filtrage géo régional |
+| `attendance_mode` | `attendance_mode` | filtrage « en ligne » éventuel |
+| `event_year` | dérivé | filtrage par année |
+
+Les champs textuels du `page_content` (description, longdescription,
+keywords, conditions) ne sont pas dupliqués en metadata pour limiter la
+taille de l'index.
+
+**`metadata`** d'un Document chunk : les 10 champs du parent + deux ajouts :
+
+- `parent_uid` : duplique `uid`, rendu explicite pour le code de jointure
+- `chunk_index` : position 0-indexée dans le parent (debug)
+
+### Résultats du build du 2026-05-26
+
+Pipeline complet `scripts/build_index.py` : streaming
+`events_clean_*.jsonl` → chunking via tokenizer MiniLM → embedding par
+batchs de 5 000 → sauvegarde FAISS + pickle parent_store. Écriture
+atomique via `.tmp/` puis swap.
+
+| Mesure | Valeur |
+|---|---:|
+| Events parents indexés | **252 901** |
+| Chunks vectorisés | **579 652** |
+| Ratio chunks / event | **2,29** (médiane 2, max 11) |
+| Débit moyen | 95 chunks/s sur CPU |
+| Durée totale du build | **1h 42min** |
+| `data/index/index.faiss` | 890 MB |
+| `data/index/index.pkl` (chunks LangChain) | 395 MB |
+| `data/index/parent_store.pkl` (mapping uid → parent) | 289 MB |
+| **Total disque** | **~1,5 GB** |
+
+### Performances à l'inférence (mesurées)
+
+- **Chargement** au démarrage de l'API : ~15 s (modèle MiniLM + index FAISS
+  + parent_store)
+- **Latence retrieval** : ~50 ms par requête (similarity search sur 580k
+  vecteurs)
+
+### Sanity check qualitatif (5 requêtes type)
+
+Les 5 requêtes suivantes ont été lancées sur l'index produit, top-K=15
+chunks dédupliqués par `parent_uid` → 5 parents :
+
+- « concert de jazz à Paris » → 5 concerts de jazz retournés (mais pas
+  filtré par ville — le tri géo est laissé pour Epic 4 via metadata)
+- « exposition de peinture contemporaine » → 5 expositions de peinture
+- « spectacle pour enfants pendant les vacances » → résultats mixtes,
+  signal qu'un filtrage `age_min/age_max` en metadata pourrait aider
+- « visite guidée du château de Versailles » → 3 events Versailles + 2
+  events thématiques liés (« Si Versailles m'était conté », « Versailles
+  de Charles V »)
+- « festival de musique en plein air été 2026 » → 5 festivals de musique
+  estivaux (mélange 2025/2026, filtrage temporel à faire côté metadata)
+
+Conclusion : le retrieval sémantique fait son travail. Le filtrage par
+metadata (ville, date) reste à câbler dans la chaîne RAG (Epic 4) pour
+serrer la précision sur les questions géographiquement ou temporellement
+explicites.
+
+### Reproduire le build
+
+```bash
+uv run python scripts/build_index.py
+uv run python scripts/build_index.py --limit 1000   # test rapide ~30 s
+```
+
+### Tests
+
+`tests/test_build_documents.py` couvre :
+
+- `build_page_content` : concaténation, omission des champs absents,
+  ordre des blocs
+- `build_metadata` : 10 clés exactes, mapping des champs, fallback
+  `last_date`, pas de fuite de champs textuels ou exclus
+- `event_to_chunks` : 1 chunk pour les courts events, N chunks
+  glissants pour les longs, recouvrement effectif entre chunks
+  consécutifs, propagation de la metadata parent + `parent_uid` +
+  `chunk_index`, aucun chunk au-delà de `chunk_size`
+
+Utilise un faux tokenizer `_CharTokenizer` (1 char = 1 token) pour
+éviter de charger MiniLM pendant les tests unitaires.
+
+```bash
+uv run pytest tests/test_build_documents.py -v
+```
+
+24 tests, ~0,2 s.
+

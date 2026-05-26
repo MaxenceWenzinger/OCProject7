@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-OpenClassrooms Project 7 — **POC RAG chatbot for the fictional client Puls-Events**, answering user questions about cultural events ingested from the Open Agenda API. Epics 1 (env setup), 2 (Open Agenda ingestion + cleaning) and 3 (FAISS vectorization with parent-child chunking) are **complete**. Current focus is Epic 4 (LangChain + Mistral-via-Ollama RAG chain).
+OpenClassrooms Project 7 — **POC RAG chatbot for the fictional client Puls-Events**, answering user questions about cultural events ingested from the Open Agenda API. Epics 1 (env setup), 2 (Open Agenda ingestion + cleaning), 3 (FAISS vectorization with parent-child chunking) and 4 (LangChain + Mistral-via-Ollama RAG chain with self-querying pre-filter) are **complete**. Current focus is Epic 5 (FastAPI exposing `/ask` and `/rebuild`).
 
 See `documentation/plan-de-travail.md` for the full epic / task breakdown and what's done vs pending.
 
@@ -39,7 +39,12 @@ src/
     clean.py                       pure cleaning functions, no I/O
   indexing/
     build_documents.py             event → Document(s) (parent + chunks)
-  rag/                             LangChain chain + Ollama wrapper (Epic 4)
+  rag/
+    llm.py                         get_llm() → ChatOllama (mistral-small:latest)
+    chain.py                       LCEL chain {context, question} → str (prompt + LLM + parser)
+    query_parser.py                self-querying LLM extractor → QueryFilters (Pydantic)
+    retrieval.py                   load index/parent_store/LUT + retrieve_parents (pre-filter)
+    service.py                     RAGService orchestrating extract → retrieve → generate
 scripts/             thin I/O wrappers around src/
   fetch_openagenda.py              streaming download to data/raw/
   clean_events.py                  full cleaning pipeline
@@ -47,14 +52,16 @@ scripts/             thin I/O wrappers around src/
   profile_lengths.py               one-off text-length profiling (exploration)
   benchmark_embeddings.py          one-off embedding model benchmark
 tests/
+  conftest.py                      shared fixtures (events + built_index, session-scoped)
   test_clean.py                    48 tests (unit)
   test_build_documents.py          24 tests (unit, fake tokenizer)
   test_indexing.py                 9 tests (integration, real MiniLM + FAISS, marked `slow`)
+  test_rag.py                      5 tests (E2E, real Ollama, marked `slow`, auto-skip if Ollama down)
 data/
   raw/                             raw JSONL from Open Agenda (gitignored, ~2 GB)
   processed/                       cleaned JSONL (gitignored, ~400 MB)
   interim/                         intermediate artifacts (gitignored)
-  index/                           FAISS index + parent_store (gitignored, ~1.5 GB, regeneratable)
+  index/                           FAISS index + parent_store + uid→faiss_ids LUT (gitignored, ~1.5 GB, regeneratable)
 documentation/
   enonce.txt                       authoritative spec, in French — "the brief"
   plan-de-travail.md               epic + task breakdown, decisions log
@@ -63,7 +70,7 @@ documentation/
 evaluation/                        Q/A dataset + Ragas evaluation (Epic 6, not started yet)
 ```
 
-**Conventions** : business logic in `src/`, runnable scripts in `scripts/`. The split lets `clean.py` and `build_documents.py` be tested in isolation with no filesystem dependency. Don't put logic in `scripts/` beyond argparse + log + I/O orchestration.
+**Conventions** : business logic in `src/`, runnable scripts in `scripts/`. The split lets `clean.py`, `build_documents.py` and the `rag/` modules be tested in isolation with no filesystem dependency. Don't put logic in `scripts/` beyond argparse + log + I/O orchestration.
 
 **Two kinds of scripts**:
 1. **Pipeline scripts** (`fetch_openagenda.py`, `clean_events.py`, `build_index.py`) — the three steps to rebuild the index from scratch. Run them in order; each picks up the output of the previous via `data/`.
@@ -112,6 +119,22 @@ These are non-obvious things about the data — saving you the discovery time:
 - **MiniLM token-budget tightness**: chunks are sized at 120 tokens to leave room for the 2 special tokens `[CLS]`/`[SEP]` the tokenizer adds automatically — the model's hard limit is 128. Going to 128 would silently truncate. The chunk size is enforced via the **real MiniLM tokenizer** (not character estimation) in `event_to_chunks`.
 - **`build_index.py` is not unit-tested**; integration coverage lives in `tests/test_indexing.py` which spins up the real MiniLM + FAISS on a 5-event fixture (~40 s). It's marked `@pytest.mark.slow` so `pytest -m "not slow"` skips it for tight dev loops.
 - **Don't try to chunk-and-embed in a single pass without batching**: the API rate limit on HF Hub is fine, but loading the model + holding 580k chunks + their embeddings in RAM all at once would blow memory. `build_index.py` batches by 5000 chunks and adds them incrementally via `db.add_documents()`.
+
+### RAG chain specifics
+
+- **LCEL, not `RetrievalQA`**: the legacy class is deprecated since LangChain 0.2 and can't host our parent-child dedup. The chain in `chain.py` is intentionally minimal (`{context, question} | prompt | llm | StrOutputParser`) — retrieval lives in Python (`retrieval.py`), invoked by `RAGService` before the chain. Tradeoff is documented in `plan-de-travail.md` (Epic 4 decisions).
+- **Self-querying via LLM**: `query_parser.py` uses `ChatOllama.with_structured_output(QueryFilters)` to extract `{city, region, year, date_after, date_before}` from the user question. Costs an extra LLM call (~6-8s on mistral-small JSON-strict, slower than free-text generation per-token). If extraction throws, `RAGService.answer` degrades gracefully to empty filters — extraction is best-effort, not a hard contract.
+- **Pre-filter on FAISS**: FAISS doesn't support metadata filtering natively — LangChain's `filter=` parameter is post-filter, which broke for rare cities (e.g. `city="Reims"` returned 0 because the 200 most-similar chunks to "jazz" are all Paris/Lyon). We do real pre-filtering via a `uid → list[faiss_id]` LUT built once (~1.6s) and disk-cached as `data/index/uid_to_faiss_ids.pkl` with mtime invalidation against `index.faiss`. At query time: select allowed uids from parent_store, expand to faiss_ids, `reconstruct_batch` the vectors, compute L2 distance in numpy. ~370ms/query, beats post-filter for rare filters. Date filters stay post-filter (per-date LUT would be disproportionate for a POC).
+- **Fail-open retrieval**: if the extracted filter returns 0 parents, we re-run the similarity search with no filter and set `filter_relaxed=True` in the returned dict. A bad filter (typo, hallucinated city) shouldn't blackhole the response.
+- **Region aliases**: the dataset has both French and English region names (`"Bretagne"` vs `"Brittany"`, `"Normandie"` vs `"Normandy"`). `retrieval.REGION_ALIASES` normalizes English to French; combined with accent-insensitive matching this absorbs the variants.
+- **`RAGService.answer(q)` returns rich dict**: `{answer, sources, filters_used, filter_relaxed, timings}`. `timings` breaks down extract/retrieve/generate/total in ms — useful for the technical report and for the upcoming FastAPI endpoint to expose.
+- **Two LLM calls per `/ask`**: extract (~7s) + generate (~11s) = ~18s warm on the dev machine. Acceptable for POC, documented in `plan-de-travail.md`. If we ever want to cut latency: stream the generation (perceived latency ~2s), or use a smaller model for extraction only.
+- **Empty `__init__.py` files in `src/rag/`** — don't re-export anything from there. Each module is imported directly (`from src.rag.service import RAGService`).
+
+### Test layout specifics
+
+- **Shared session-scoped fixtures in `tests/conftest.py`**: `fixture_events` (5 thematically distinct events) and `built_index` (FAISS index built once, ~10-15s). `test_indexing.py` and `test_rag.py` both consume them — the index build is paid once per pytest session, not once per file.
+- **`tests/test_rag.py` auto-skips if Ollama is down**: `ollama_available` fixture pings `localhost:11434/api/tags` with a 2s timeout and calls `pytest.skip(...)` on failure. CI without Ollama shows SKIPPED, not FAILED. The test is the only thing in the repo with a hard runtime dependency on Ollama, and it's `slow`-marked.
 
 ### Glossary
 

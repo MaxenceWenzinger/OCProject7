@@ -16,10 +16,10 @@ Trois responsabilités :
    strict ou typo dans la question), on relance sans filtre — un filtre
    est un signal, pas une contrainte stricte.
 
-Limitation assumée : les filtres temporels (`date_after`/`date_before`)
-restent en post-filter. Construire un LUT par date serait disproportionné
-pour un POC ; les questions temporelles passent par la voie standard
-post-filter avec un `fetch_k` raisonnable.
+Les filtres temporels (`date_after`/`date_before`) sont eux aussi
+appliqués en pre-filter, sur les champs `first_date`/`last_date` de
+la metadata parent. Un event est gardé si sa fenêtre `[first_date,
+last_date]` chevauche `[date_after, date_before]`.
 """
 
 from __future__ import annotations
@@ -29,7 +29,6 @@ import pickle
 import time
 import unicodedata
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 from langchain_community.vectorstores import FAISS
@@ -170,21 +169,31 @@ def _select_allowed_uids(
     filters: QueryFilters,
     parent_store: dict[str, Document],
 ) -> set[str] | None:
-    """Calcule l'ensemble des `uid` qui passent les filtres exacts (city/region/year).
+    """Calcule l'ensemble des `uid` qui passent les filtres exacts.
 
-    Renvoie `None` si aucun filtre exact n'est défini (= « pas de
+    Champs filtrés : `city`, `region`, `year`, `date_after`, `date_before`.
+    Renvoie `None` si aucun de ces filtres n'est défini (= « pas de
     pre-filter, on tombe sur la voie standard »). Sinon, itère sur les
-    252 901 events du `parent_store` (~50ms) et garde ceux qui matchent."""
+    252 901 events du `parent_store` (~50ms) et garde ceux qui matchent.
+
+    Convention dates : un event « chevauche » la fenêtre `[date_after,
+    date_before]` si `last_date >= date_after` ET `first_date <=
+    date_before`. Les dates ISO 8601 se comparent lexicographiquement
+    sur les 10 premiers caractères (YYYY-MM-DD)."""
     has_city = filters.city is not None
     has_region = filters.region is not None
     has_year = filters.year is not None
+    has_date_after = filters.date_after is not None
+    has_date_before = filters.date_before is not None
 
-    if not (has_city or has_region or has_year):
+    if not (has_city or has_region or has_year or has_date_after or has_date_before):
         return None
 
     city_norm = _normalize(filters.city) if has_city else None
     region_norm = _normalize_region(filters.region) if has_region else None
     year = filters.year
+    date_after = filters.date_after
+    date_before = filters.date_before
 
     allowed: set[str] = set()
     for uid, parent in parent_store.items():
@@ -195,33 +204,16 @@ def _select_allowed_uids(
             continue
         if has_year and meta.get("event_year") != year:
             continue
-        allowed.add(uid)
-    return allowed
-
-
-def _build_date_filter(filters: QueryFilters) -> Callable[[dict], bool] | None:
-    """Construit un callable post-filter pour les bornes de date.
-
-    Convention : un event « chevauche » la fenêtre demandée si
-    `last_date >= date_after` ET `first_date <= date_before`. Les dates
-    ISO 8601 se comparent lexicographiquement."""
-    date_after = filters.date_after
-    date_before = filters.date_before
-    if date_after is None and date_before is None:
-        return None
-
-    def _filter(meta: dict) -> bool:
-        if date_after is not None:
+        if has_date_after:
             last = meta.get("last_date") or meta.get("first_date")
             if last is None or last[:10] < date_after:
-                return False
-        if date_before is not None:
+                continue
+        if has_date_before:
             first = meta.get("first_date")
             if first is None or first[:10] > date_before:
-                return False
-        return True
-
-    return _filter
+                continue
+        allowed.add(uid)
+    return allowed
 
 
 # ---------------------------------------------------------------------------
@@ -245,25 +237,23 @@ def retrieve_parents(
 
     Pipeline (deux voies selon les filtres) :
 
-    **Voie pre-filter** (filtres exacts city/region/year présents) :
+    **Voie pre-filter** (au moins un filtre extrait — city, region,
+    year, date_after ou date_before) :
     1. Calcule `allowed_uids` depuis le parent_store (itération ~50ms).
     2. Récupère `allowed_faiss_ids` via le LUT inverse (O(n_uids)).
     3. Reconstruit les vecteurs correspondants depuis FAISS.
     4. Calcule la distance L2 query-vecteurs en numpy (vectorisé).
-    5. Si bornes de date présentes, post-filtre ces résultats par date.
-    6. Garde les `k_chunks` meilleurs.
+    5. Garde les `k_chunks` meilleurs.
 
-    **Voie standard** (pas de filtre exact, ou que des dates) :
-    1. `similarity_search(query, k=k_chunks, fetch_k=fetch_k, filter=date_filter)`.
+    **Voie standard** (aucun filtre extrait) :
+    1. `similarity_search(query, k=k_chunks, fetch_k=fetch_k)`.
 
     Puis dans les deux cas : dédup par `parent_uid`, lookup parent, retour
     top `k_parents`. Fail-open si 0 résultat et `fail_open=True`.
 
     Retour : `(parents, filter_was_relaxed)` — le bool dit si on a
     dégradé en no-filter (utile pour logger et debugger)."""
-    use_prefilter = filters is not None and (
-        filters.city is not None or filters.region is not None or filters.year is not None
-    )
+    use_prefilter = filters is not None and not filters.is_empty()
 
     if use_prefilter:
         chunks = _search_prefiltered(
@@ -271,11 +261,7 @@ def retrieve_parents(
             embeddings, filters, k_chunks,
         )
     else:
-        date_filter = _build_date_filter(filters) if filters else None
-        chunks = vector_store.similarity_search(
-            query, k=k_chunks, fetch_k=fetch_k,
-            **({"filter": date_filter} if date_filter else {}),
-        )
+        chunks = vector_store.similarity_search(query, k=k_chunks, fetch_k=fetch_k)
 
     parents = _dedup_to_parents(chunks, parent_store, k_parents)
 
@@ -333,18 +319,12 @@ def _search_prefiltered(
     top_idx = np.argpartition(sq_dists, top_n - 1)[:top_n]
     top_idx = top_idx[np.argsort(sq_dists[top_idx])]
 
-    # Post-filtre date sur ces top candidats
-    date_filter = _build_date_filter(filters)
-
     docstore = vector_store.docstore
     results: list[Document] = []
     for local_idx in top_idx:
         faiss_id = int(allowed_ids[local_idx])
         doc_id = vector_store.index_to_docstore_id[faiss_id]
-        doc = docstore.search(doc_id)
-        if date_filter is not None and not date_filter(doc.metadata):
-            continue
-        results.append(doc)
+        results.append(docstore.search(doc_id))
     return results
 
 

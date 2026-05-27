@@ -101,16 +101,45 @@ Découpage en 8 epics. Chaque tâche est dimensionnée pour ≤ une demi-journé
 
 ---
 
-### EPIC 5 — API REST FastAPI
+### EPIC 5 — API REST FastAPI ✅
 
-*Couvre l'étape 5 (partie API). Dépend de l'Epic 4.*
+*Couvre l'étape 5 (partie API). Dépend de l'Epic 4. **Livré.***
 
-- **P7-5.1** Squelette FastAPI dans `api/main.py` : app, route racine `/` health-check, configuration CORS minimale
-- **P7-5.2** Schémas Pydantic dans `api/schemas.py` : `AskRequest { question: str }`, `AskResponse { answer: str, sources: list[Source] }`, `Source { title, date, url }`
-- **P7-5.3** Endpoint `POST /ask` : injecte le `RAGService` (singleton via `lifespan` FastAPI pour éviter de recharger l'index à chaque requête), gestion d'erreur question vide → 422
-- **P7-5.4** Endpoint `POST /rebuild` : déclenche `scripts/build_index.py` (en arrière-plan via `BackgroundTasks` pour ne pas bloquer la réponse) sur le clean le plus récent. Noter dans la doc qu'en prod il faudrait protéger cet endpoint et éventuellement précéder par un fetch+clean (les trois scripts sont exécutables manuellement à la chaîne, cf. README).
-- **P7-5.5** Test fonctionnel `tests/test_api.py` avec `httpx.AsyncClient` : `/ask` répond 200 sur question valide, 422 sur question vide, présence du champ `sources`
-- **P7-5.6** Vérifier la doc Swagger générée sur `/docs` et compléter les descriptions de routes / exemples Pydantic pour qu'elle soit présentable en démo
+Endpoints imposés par l'énoncé (cités tels quels) : « Un endpoint `/ask` (POST) qui prend une question et renvoie une réponse générée. Un endpoint `/rebuild` (GET ou POST) pour reconstruire la base vectorielle à la demande. ». Plus la recommandation : « Protégez les endpoints sensibles (comme `/rebuild`) s'ils étaient un jour exposés publiquement. ».
+
+- [x] **P7-5.1** Squelette FastAPI dans `api/main.py` : app + `HealthResponse` typé sur `GET /` + `logging.basicConfig(level=INFO, ...)` + `lifespan` qui instancie le `RAGService` singleton, charge `RebuildState.load()` depuis `data/index/rebuild_state.json`, et log un warning bruyant si `ADMIN_TOKEN` n'est pas défini. Pas de CORS — l'API n'est pas appelée depuis un navigateur dans le scope du POC.
+- [x] **P7-5.2** Schémas Pydantic dans `api/schemas.py` : `AskRequest { question: str (min_length=1) }`, `AskResponse { answer, sources, filters_used: dict, filter_relaxed: bool }`, `Source { uid, title, description, url, location_city, first_date, last_date }` (champ `description` ajouté en cours d'epic pour donner plus de contexte à l'utilisateur, extrait à la volée depuis le `page_content` du parent — voir P7-5.6 ci-dessous), `RebuildResponse { status, started_at }`, `RebuildStatusResponse { in_progress, started_at?, finished_at?, last_error? }`, plus `HealthResponse { status, rag_ready }`. Exemples Swagger sur `AskRequest` et `Source`.
+- [x] **P7-5.3** Endpoint `POST /ask` : injecte le `RAGService` depuis l'état du `lifespan`. `rebuild_in_progress=True` → **`503`** avec message explicite. Service non initialisé → `503`. Question vide → `422` (validation Pydantic). Question valide → `service.answer(question)` puis mapping vers `AskResponse`. Helper `_extract_short_description` qui découpe `page_content` sur `\n\n` et prend le 2e bloc (description courte) en sautant le titre et les blocs préfixés `Mots-clés :`/`Conditions :` — plafonné à 300 chars + ellipsis Unicode.
+- [x] **P7-5.4** Endpoint `POST /rebuild` **protégé par Bearer token statique** + endpoint `GET /rebuild/status` non protégé. Code dans `api/rebuild.py`.
+   - **Auth** : header `Authorization: Bearer <token>` comparé à `os.getenv("ADMIN_TOKEN")` via `secrets.compare_digest` (constant-time). Token généré une fois (`secrets.token_urlsafe(32)`), stocké dans `.env` (gitignored), documenté dans le README + `.env.example`. Refus → `401 Unauthorized` avec header `WWW-Authenticate: Bearer`. `ADMIN_TOKEN` absent → `503` (fail-secure). Dépendance FastAPI `verify_admin_token` réutilisable.
+   - **Portée du rebuild** : **fetch + clean + build** dans cet ordre. Appelle directement les fonctions métier des scripts existants — `scripts.fetch_openagenda.fetch(...)`, `scripts.clean_events.clean_stream(...)`, `scripts.build_index.build(...)` — sans créer de `scripts/rebuild_index.py` centralisé (cohérent avec la décision Epic 3). Imports paresseux dans `run_rebuild` pour ne pas payer le coût au démarrage de l'API.
+   - **Concurrence** : `app.state.rebuild_in_progress: bool` levé avant le job, baissé en `finally`. `/ask` check ce flag → `503` pendant le rebuild. Deuxième `POST /rebuild` simultané → `409 Conflict`.
+   - **Asynchronisme** : la requête HTTP renvoie `202 Accepted` immédiatement via `BackgroundTasks` FastAPI ; le job tourne en arrière-plan dans le même process. ~12 min (fetch) + 4 min (clean) + 1h42 (build) = ~2h sur la machine de dev.
+   - **Hot-swap de l'index** : à la fin du build, on instancie un nouveau `RAGService()` et on remplace `app.state.rag_service`. Si l'init plante (manque RAM, fichier corrompu), on garde l'ancien service et on log l'erreur dans `state.last_error` — l'API reste fonctionnelle.
+   - **`GET /rebuild/status`** non protégé : renvoie l'état + horodatages début/fin + dernière erreur éventuelle.
+   - **Persistance de l'état** : `RebuildState` exposé via dataclass + `save()` (écriture atomique `.tmp` → rename dans `data/index/rebuild_state.json`) + `load()` (état vide si fichier absent). `in_progress` n'est pas persisté (fail-safe : un crash pendant rebuild ne ressort pas avec un flag bloqué). Le fichier est gitignored. Décidé en cours d'epic pour qu'un redémarrage d'API ne perde pas `started_at`/`finished_at`/`last_error`.
+- [x] **P7-5.5** Test fonctionnel `tests/test_api.py` avec `fastapi.testclient.TestClient` synchrone + `lifespan` :
+   - `/ask` répond 200 sur question valide avec sources non-vides + payload aligné sur le dict de `RAGService.answer()`
+   - `/ask` répond 422 sur question vide / champ manquant
+   - `/ask` répond 503 pendant rebuild
+   - `/rebuild` sans token → 401, mauvais token → 401, `ADMIN_TOKEN` absent → 503
+   - `/rebuild` avec bon token → 202, BackgroundTask exécutée
+   - `/rebuild` pendant rebuild → 409
+   - `/rebuild/status` (idle, in_progress, sans auth) → 200
+   - `/` health-check
+   - **Choix** : `TestClient` (synchrone) plutôt que `httpx.AsyncClient` mentionné dans le plan initial — évite d'ajouter `pytest-asyncio` aux deps. Mock `MagicMock()` du `RAGService` et `monkeypatch.setattr` de `api.main.run_rebuild` — aucune charge réelle d'index ni de fetch Open Agenda en CI. **14 tests, ~3,5 s, marqués `not slow`.**
+- [x] **P7-5.6** Swagger `/docs` polissé : tous les schémas Pydantic ont un `response_model=` typé (y compris `HealthResponse`, pour éviter le placeholder `additionalProp1`), `summary` + docstring sur chaque route, `responses` documentés (401/409/422/503), exemples Pydantic via `json_schema_extra` sur les schémas d'entrée. Bearer Auth câblé via `fastapi.security.HTTPBearer(auto_error=False)` → cadenas Authorize fonctionnel pour la démo (coller le token sans le préfixe `Bearer`).
+
+**Améliorations qualité menées en plus du périmètre P7-5.x** (suite aux tests live via Swagger) :
+
+- **Pre-filter étendu aux dates** (`src/rag/retrieval.py`) : `date_after` et `date_before` étaient en post-filter, ce qui causait des résultats vides pour les questions « Paris entre juin et octobre » (sur 15 chunks top-similarité Paris, presque aucun n'était dans la fenêtre temporelle, donc 0-1 source au final). Désormais les dates sont intégrées à `_select_allowed_uids` au même titre que city/region/year — pre-filter complet, plus de post-filter, `_build_date_filter` supprimé.
+- **Prompt extracteur self-querying enrichi avec la date système** (`src/rag/query_parser.py`) : Mistral-small produisait `date_after=2023-06-01` quand on demandait « entre juin et octobre » (cutoff de son entraînement). Solution : injection de `{today}` et `{weekday}` via `RunnablePassthrough.assign` à chaque invocation (frais à chaque appel, pas figé au démarrage), prompt système réécrit pour exiger la résolution des expressions relatives (« ce dimanche », « cet été »...), l'analyse du temps grammatical de la **requête principale** (présent/futur/conditionnel → `date_after = aujourd'hui` ; passé sur la requête elle-même → `date_before = aujourd'hui`), et la levée explicite via « n'importe quand » → tout à null. Validé sur 6 cas dont le piège « j'ai entendu qu'il y avait... pourrais-tu m'en lister » (subordonnée au passé, requête au conditionnel).
+- **`k_parents`/`k_chunks` augmentés** (`src/rag/service.py`) : passés de 5/15 à **10/30**. Mistral-small encaisse facilement 10 parents (~3-6k tokens, fenêtre 32k). Ratio chunks/parents conservé à 3. Améliore les réponses sur les questions ouvertes (« liste-moi des expos ») au prix d'un léger surcoût de génération.
+
+**Note rapport (section perspectives)** : ce qui manque pour une vraie prod sur `/rebuild` — rotation du token, audit log des accès admin, HTTPS obligatoire, IP allowlist, rate-limiting global. Conforme à la formulation de l'énoncé (« s'ils étaient un jour exposés publiquement »).
+
+**Tâche initialement prévue, sciemment écartée** :
+- ~~Tests via `httpx.AsyncClient`~~ — `TestClient` synchrone (qui enveloppe httpx) couvre 100 % du besoin, gère le lifespan via context manager, et évite l'ajout de `pytest-asyncio` aux dev deps.
 
 ---
 
@@ -130,7 +159,7 @@ Découpage en 8 epics. Chaque tâche est dimensionnée pour ≤ une demi-journé
 
 *Couvre l'étape 6 + l'aspect CI. Dépend des Epics 5 et 6.*
 
-- **P7-7.1** `Dockerfile` API : base `python:3.11-slim`, install des deps, copie du code et de l'index pré-construit (l'index est buildé hors Docker pour ne pas dépendre d'Ollama au build), `CMD uvicorn api.main:app --host 0.0.0.0`
+- **P7-7.1** `Dockerfile` API : base `python:3.12-slim`, install des deps, copie du code et de l'index pré-construit (l'index est buildé hors Docker pour ne pas dépendre d'Ollama au build), `CMD uvicorn api.main:app --host 0.0.0.0`
 - **P7-7.2** Gérer la connexion à Ollama depuis le conteneur : Ollama tourne sur l'hôte → `host.docker.internal:11434` (variable d'env `OLLAMA_HOST`)
 - **P7-7.3** (Optionnel) `docker-compose.yml` orchestrant API + Ollama si on veut tout containeriser
 - **P7-7.4** Test E2E manuel : `docker build` → `docker run` → `curl POST /ask` répond correctement

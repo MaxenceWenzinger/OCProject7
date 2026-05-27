@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-OpenClassrooms Project 7 — **POC RAG chatbot for the fictional client Puls-Events**, answering user questions about cultural events ingested from the Open Agenda API. Epics 1 (env setup), 2 (Open Agenda ingestion + cleaning), 3 (FAISS vectorization with parent-child chunking) and 4 (LangChain + Mistral-via-Ollama RAG chain with self-querying pre-filter) are **complete**. Current focus is Epic 5 (FastAPI exposing `/ask` and `/rebuild`).
+OpenClassrooms Project 7 — **POC RAG chatbot for the fictional client Puls-Events**, answering user questions about cultural events ingested from the Open Agenda API. Epics 1 (env setup), 2 (Open Agenda ingestion + cleaning), 3 (FAISS vectorization with parent-child chunking), 4 (LangChain + Mistral-via-Ollama RAG chain with self-querying pre-filter) and 5 (FastAPI exposing `/ask` and `/rebuild`) are **complete**. Current focus is Epic 6 (Ragas evaluation on an annotated Q/A test set).
 
 See `documentation/plan-de-travail.md` for the full epic / task breakdown and what's done vs pending.
 
@@ -33,7 +33,10 @@ The brief from "Jérémy, Responsable technique" mandates a specific stack. Some
 ## Repository layout
 
 ```
-api/                 FastAPI app (Epic 5, not started yet)
+api/
+  main.py                          FastAPI app : lifespan + routes /, /ask, /rebuild, /rebuild/status
+  schemas.py                       Pydantic : AskRequest/Response, Source, RebuildResponse, HealthResponse
+  rebuild.py                       Bearer auth dependency + run_rebuild() job + RebuildState (save/load JSON)
 src/
   data/
     clean.py                       pure cleaning functions, no I/O
@@ -42,8 +45,8 @@ src/
   rag/
     llm.py                         get_llm() → ChatOllama (mistral-small:latest)
     chain.py                       LCEL chain {context, question} → str (prompt + LLM + parser)
-    query_parser.py                self-querying LLM extractor → QueryFilters (Pydantic)
-    retrieval.py                   load index/parent_store/LUT + retrieve_parents (pre-filter)
+    query_parser.py                self-querying LLM extractor → QueryFilters (Pydantic, today-aware)
+    retrieval.py                   load index/parent_store/LUT + retrieve_parents (pre-filter incl. dates)
     service.py                     RAGService orchestrating extract → retrieve → generate
 scripts/             thin I/O wrappers around src/
   fetch_openagenda.py              streaming download to data/raw/
@@ -57,17 +60,19 @@ tests/
   test_build_documents.py          24 tests (unit, fake tokenizer)
   test_indexing.py                 9 tests (integration, real MiniLM + FAISS, marked `slow`)
   test_rag.py                      5 tests (E2E, real Ollama, marked `slow`, auto-skip if Ollama down)
+  test_api.py                      14 tests (functional, TestClient, mocked RAGService + job)
 data/
   raw/                             raw JSONL from Open Agenda (gitignored, ~2 GB)
   processed/                       cleaned JSONL (gitignored, ~400 MB)
   interim/                         intermediate artifacts (gitignored)
-  index/                           FAISS index + parent_store + uid→faiss_ids LUT (gitignored, ~1.5 GB, regeneratable)
+  index/                           FAISS index + parent_store + uid→faiss_ids LUT + rebuild_state.json (gitignored, ~1.5 GB, regeneratable)
 documentation/
   enonce.txt                       authoritative spec, in French — "the brief"
   plan-de-travail.md               epic + task breakdown, decisions log
   data.md                          dataset + index reference: source, schema, cleaning, FAISS build
   Template+de+rapport+technique.docx   technical report template
 evaluation/                        Q/A dataset + Ragas evaluation (Epic 6, not started yet)
+.env / .env.example                ADMIN_TOKEN for /rebuild auth (.env gitignored, .env.example committed)
 ```
 
 **Conventions** : business logic in `src/`, runnable scripts in `scripts/`. The split lets `clean.py`, `build_documents.py` and the `rag/` modules be tested in isolation with no filesystem dependency. Don't put logic in `scripts/` beyond argparse + log + I/O orchestration.
@@ -76,10 +81,12 @@ evaluation/                        Q/A dataset + Ragas evaluation (Epic 6, not s
 1. **Pipeline scripts** (`fetch_openagenda.py`, `clean_events.py`, `build_index.py`) — the three steps to rebuild the index from scratch. Run them in order; each picks up the output of the previous via `data/`.
 2. **Exploration scripts** (`profile_lengths.py`, `benchmark_embeddings.py`) — one-off measurements that guided design decisions. Kept in the repo for traceability but not part of the production pipeline.
 
-## Required endpoints (Epic 5)
+## API endpoints (Epic 5, live)
 
-- `POST /ask` — accepts a question, returns a generated answer grounded in the FAISS index. **Stateless** (no conversation history — brief explicitly says so for the POC).
-- `POST /rebuild` — rebuilds the vector index on demand. Brief warns to treat this as sensitive ; not for public exposure.
+- `GET /` — health-check (`HealthResponse { status, rag_ready }`).
+- `POST /ask` — `AskRequest { question }` → `AskResponse { answer, sources[], filters_used, filter_relaxed }`. **Stateless** (no conversation history — brief explicitly says so for the POC). Returns `503` if a rebuild is running, `422` on empty question.
+- `POST /rebuild` — Bearer-protected, fires `fetch + clean + build + hot-swap` as a `BackgroundTask`, returns `202` immediately. `409` if already running, `401` on bad/missing token, `503` if `ADMIN_TOKEN` env var is unset (fail-secure).
+- `GET /rebuild/status` — unprotected, returns `in_progress / started_at / finished_at / last_error`. State persists across restarts via `data/index/rebuild_state.json`.
 
 ## Required deliverables beyond code
 
@@ -94,7 +101,7 @@ Graded artifacts, not nice-to-haves:
 ## Environment
 
 - `uv sync` is enough to install everything. Run commands via `uv run …`.
-- `.env` is gitignored. No Mistral cloud key is needed (Ollama is local) — `.env` only matters if a future feature needs secrets.
+- **`.env` is required** (gitignored). Copy `.env.example` and fill `ADMIN_TOKEN` (Bearer token for `POST /rebuild`). Generate one via `uv run python -c "import secrets; print(secrets.token_urlsafe(32))"`. If `ADMIN_TOKEN` is unset at startup, the lifespan logs a loud warning and `/rebuild` answers `503` (fail-secure). No Mistral cloud key is needed (Ollama is local).
 - **Ollama is a separate prerequisite** (not in `uv sync`). The README documents `ollama pull mistral-small:latest`.
 
 ## Working notes
@@ -115,7 +122,7 @@ These are non-obvious things about the data — saving you the discovery time:
 ### Indexing specifics
 
 - **Index layout on disk** (in `data/index/`): three files, always together — `index.faiss` (the FAISS binary, ~890 MB), `index.pkl` (LangChain mapping vector_id → chunk Document, ~395 MB), and `parent_store.pkl` (our addition: dict `uid → parent Document`, ~289 MB). The first two are written by `FAISS.save_local()` and reloaded together via `FAISS.load_local()`. The third is our additional pickle, loaded separately at API startup for the parent-child join.
-- **Parent-child invariant**: each chunk Document carries `parent_uid` (duplicated from `uid` for clarity) and `chunk_index` (debug). At retrieval, dedup the FAISS hits by `parent_uid` and pull the full text from `parent_store` before passing to the LLM. Top-K of ~15 chunks is needed to consistently yield ~5 distinct parents (ratio is ~2.3 chunks/event).
+- **Parent-child invariant**: each chunk Document carries `parent_uid` (duplicated from `uid` for clarity) and `chunk_index` (debug). At retrieval, dedup the FAISS hits by `parent_uid` and pull the full text from `parent_store` before passing to the LLM. `RAGService` defaults are `k_chunks=30 / k_parents=10` (ratio 3, dataset chunks/event median 2.3 — comfortable margin before dedup).
 - **MiniLM token-budget tightness**: chunks are sized at 120 tokens to leave room for the 2 special tokens `[CLS]`/`[SEP]` the tokenizer adds automatically — the model's hard limit is 128. Going to 128 would silently truncate. The chunk size is enforced via the **real MiniLM tokenizer** (not character estimation) in `event_to_chunks`.
 - **`build_index.py` is not unit-tested**; integration coverage lives in `tests/test_indexing.py` which spins up the real MiniLM + FAISS on a 5-event fixture (~40 s). It's marked `@pytest.mark.slow` so `pytest -m "not slow"` skips it for tight dev loops.
 - **Don't try to chunk-and-embed in a single pass without batching**: the API rate limit on HF Hub is fine, but loading the model + holding 580k chunks + their embeddings in RAM all at once would blow memory. `build_index.py` batches by 5000 chunks and adds them incrementally via `db.add_documents()`.
@@ -123,13 +130,24 @@ These are non-obvious things about the data — saving you the discovery time:
 ### RAG chain specifics
 
 - **LCEL, not `RetrievalQA`**: the legacy class is deprecated since LangChain 0.2 and can't host our parent-child dedup. The chain in `chain.py` is intentionally minimal (`{context, question} | prompt | llm | StrOutputParser`) — retrieval lives in Python (`retrieval.py`), invoked by `RAGService` before the chain. Tradeoff is documented in `plan-de-travail.md` (Epic 4 decisions).
-- **Self-querying via LLM**: `query_parser.py` uses `ChatOllama.with_structured_output(QueryFilters)` to extract `{city, region, year, date_after, date_before}` from the user question. Costs an extra LLM call (~6-8s on mistral-small JSON-strict, slower than free-text generation per-token). If extraction throws, `RAGService.answer` degrades gracefully to empty filters — extraction is best-effort, not a hard contract.
-- **Pre-filter on FAISS**: FAISS doesn't support metadata filtering natively — LangChain's `filter=` parameter is post-filter, which broke for rare cities (e.g. `city="Reims"` returned 0 because the 200 most-similar chunks to "jazz" are all Paris/Lyon). We do real pre-filtering via a `uid → list[faiss_id]` LUT built once (~1.6s) and disk-cached as `data/index/uid_to_faiss_ids.pkl` with mtime invalidation against `index.faiss`. At query time: select allowed uids from parent_store, expand to faiss_ids, `reconstruct_batch` the vectors, compute L2 distance in numpy. ~370ms/query, beats post-filter for rare filters. Date filters stay post-filter (per-date LUT would be disproportionate for a POC).
+- **Self-querying via LLM, today-aware**: `query_parser.py` uses `ChatOllama.with_structured_output(QueryFilters)` to extract `{city, region, year, date_after, date_before}`. The system prompt receives the current date and weekday via `RunnablePassthrough.assign` on each invocation (not frozen at startup — the API may run for days). The LLM is told to resolve relative dates (« ce dimanche », « cet été ») into ISO dates, to infer `date_after = today` when the main clause is present/future and no date is given, and to inspect the main clause's grammatical tense — not subordinate context clauses (e.g. « j'ai entendu qu'il y avait... pourrais-tu m'en lister » is a future request). « N'importe quand » is the explicit escape hatch for nulling both date bounds. If extraction throws, `RAGService.answer` degrades gracefully to empty filters.
+- **Pre-filter on FAISS, all five fields**: FAISS doesn't support metadata filtering natively — LangChain's `filter=` parameter is post-filter, which broke for rare cities (e.g. `city="Reims"` returned 0 because the 200 most-similar chunks to "jazz" are all Paris/Lyon). We do real pre-filtering via a `uid → list[faiss_id]` LUT built once (~1.6s) and disk-cached as `data/index/uid_to_faiss_ids.pkl` with mtime invalidation against `index.faiss`. At query time: select allowed uids from parent_store, expand to faiss_ids, `reconstruct_batch` the vectors, compute L2 distance in numpy. ~370ms/query. **All five filters (city / region / year / date_after / date_before) are evaluated as pre-filter** against the parent metadata (`first_date` / `last_date` overlap with the requested window). Date post-filtering was tried first but was inadequate: on Paris × June-Oct 2026, the top-15 most-similar chunks contained ~1 in the date window, so the user got 1 source instead of 10. Iterating the parent_store on dates is cheap (~same complexity as city/region).
 - **Fail-open retrieval**: if the extracted filter returns 0 parents, we re-run the similarity search with no filter and set `filter_relaxed=True` in the returned dict. A bad filter (typo, hallucinated city) shouldn't blackhole the response.
 - **Region aliases**: the dataset has both French and English region names (`"Bretagne"` vs `"Brittany"`, `"Normandie"` vs `"Normandy"`). `retrieval.REGION_ALIASES` normalizes English to French; combined with accent-insensitive matching this absorbs the variants.
 - **`RAGService.answer(q)` returns rich dict**: `{answer, sources, filters_used, filter_relaxed, timings}`. `timings` breaks down extract/retrieve/generate/total in ms — useful for the technical report and for the upcoming FastAPI endpoint to expose.
 - **Two LLM calls per `/ask`**: extract (~7s) + generate (~11s) = ~18s warm on the dev machine. Acceptable for POC, documented in `plan-de-travail.md`. If we ever want to cut latency: stream the generation (perceived latency ~2s), or use a smaller model for extraction only.
 - **Empty `__init__.py` files in `src/rag/`** — don't re-export anything from there. Each module is imported directly (`from src.rag.service import RAGService`).
+
+### API specifics
+
+- **Lifespan + `app.state`**: the FastAPI lifespan instantiates the `RAGService` singleton, loads `RebuildState.load()` from disk, and warns if `ADMIN_TOKEN` is missing. All routes pull from `request.app.state` — no globals, mock-friendly in tests.
+- **`/ask` 503 conditions**: returns 503 if `rebuild_in_progress=True` (an index swap is in flight) or if `rag_service is None` (lifespan didn't finish — typically only seen when bypassing lifespan in tests).
+- **`/rebuild` runs the full pipeline**: not just `build_index`. Interprets "reconstruire la base vectorielle" as `fetch + clean + build + hot-swap`. Calls business functions directly from the scripts (`scripts.fetch_openagenda.fetch`, `scripts.clean_events.clean_stream`, `scripts.build_index.build`) — no `rebuild_index.py` wrapper script. Imports are lazy inside `run_rebuild` so the API startup doesn't pay sentence-transformers loading cost twice.
+- **Hot-swap safety**: at the end of the job, a new `RAGService()` is instantiated, **then** `app.state.rag_service` is replaced. If the new instance throws (e.g. corrupted index after a partial write), the old service stays in place and the error is stored in `state.last_error`. The flag is always cleared in `finally`.
+- **`rebuild_state.json` persistence**: lives in `data/index/rebuild_state.json` (gitignored). Contains `started_at / finished_at / last_error`. `in_progress` is intentionally NOT persisted — a crash mid-rebuild should not leave the API stuck answering 503 forever. Loaded once at lifespan startup. The current file was hand-crafted: `finished_at = mtime(index.faiss)`, `started_at = finished_at - 1h58` (~12 min fetch + 4 min clean + 1h42 build). A real `/rebuild` run rewrites it automatically.
+- **Bearer auth**: `verify_admin_token` dependency uses `HTTPBearer(auto_error=False)` so we control the 401 response shape (default is 403 when header is missing). Comparison via `secrets.compare_digest` (constant-time). Swagger's Authorize lock accepts the raw token (no `Bearer ` prefix — it's added automatically).
+- **Two response views on the same parent Document**: the LLM sees the full `page_content` (title + description + longdescription + keywords + conditions) via `format_docs` in `chain.py`. The API user sees a metadata-only `Source` projection + a short description extracted on-the-fly from `page_content` (2nd block after splitting on `\n\n`, skipping the title and the `Mots-clés :`/`Conditions :` blocks, capped at 300 chars). `description_fr` is not in the FAISS metadata to save disk space, but it IS recoverable from `page_content`.
+- **Test layer mocks**: `tests/test_api.py` uses `MagicMock()` for `RAGService` and `monkeypatch.setattr("api.main.run_rebuild", ...)` to stub the 2h job. `monkeypatch.setenv("ADMIN_TOKEN", ...)` rather than touching `.env`. 14 tests in ~3.5s, marked `not slow`, runs in CI without Ollama/FAISS/MiniLM loaded.
 
 ### Test layout specifics
 

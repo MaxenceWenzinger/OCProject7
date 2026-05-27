@@ -62,8 +62,8 @@ class RAGService:
     def __init__(
         self,
         index_dir: Path = DEFAULT_INDEX_DIR,
-        k_parents: int = 5,
-        k_chunks: int = 15,
+        k_parents: int = 10,
+        k_chunks: int = 30,
         fetch_k: int = 200,
     ) -> None:
         t0 = time.perf_counter()

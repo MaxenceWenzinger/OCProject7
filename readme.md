@@ -56,11 +56,51 @@ Vérifier qu'Ollama répond bien sur le port par défaut :
 curl http://localhost:11434/api/tags
 ```
 
+### 3. Configurer le fichier `.env`
+
+L'API a besoin d'un `ADMIN_TOKEN` pour protéger l'endpoint `POST /rebuild`. Copie `.env.example` en `.env` (gitignored), puis génère un token :
+
+```powershell
+uv run python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+et colle-le dans la variable `ADMIN_TOKEN`. Si le token n'est pas défini au démarrage, l'API log un warning et `POST /rebuild` répond systématiquement `503` (fail-secure) — les autres endpoints restent fonctionnels.
+
+Voir la section [Variables d'environnement](#variables-denvironnement) pour la liste complète.
+
+## Lancer l'API
+
+```powershell
+uv run uvicorn api.main:app --reload
+```
+
+L'API démarre sur `http://localhost:8000`. Le premier démarrage prend ~15 s (chargement du modèle d'embedding + index FAISS + parent_store + connexion Ollama). Endpoints disponibles :
+
+| Méthode | Route | Description |
+|---|---|---|
+| GET | `/` | Health-check (renvoie `rag_ready: true` quand le service est chargé). |
+| POST | `/ask` | Question/réponse RAG. Body : `{ "question": "..." }`. |
+| POST | `/rebuild` | Reconstruction complète de l'index (fetch + clean + build, ~2 h). **Protégé par Bearer token** (`Authorization: Bearer <ADMIN_TOKEN>`). |
+| GET | `/rebuild/status` | État du dernier (ou courant) job de rebuild. Non protégé. |
+
+Documentation interactive Swagger : [http://localhost:8000/docs](http://localhost:8000/docs). Le cadenas « Authorize » accepte le token brut (sans le préfixe `Bearer`).
+
+Exemple `/ask` au curl :
+
+```powershell
+curl -X POST http://localhost:8000/ask `
+  -H "Content-Type: application/json" `
+  -d '{\"question\": \"Quels concerts de jazz à Paris cet été ?\"}'
+```
+
 ## Structure du projet
 
 ```
 OCProject7/
-├── api/                # Application FastAPI (endpoints /ask, /rebuild)
+├── api/                # Application FastAPI
+│   ├── main.py             lifespan + routes /, /ask, /rebuild, /rebuild/status
+│   ├── schemas.py          schémas Pydantic d'entrée/sortie
+│   └── rebuild.py          auth Bearer + job de rebuild en BackgroundTasks
 ├── data/               # Données — sous-dossiers ignorés par git
 │   ├── raw/                events bruts Open Agenda (~2 GB, ignorés)
 │   ├── interim/            transformations intermédiaires (ignorées)
@@ -121,19 +161,26 @@ Chaque script est idempotent et peut être lancé seul. Les fichiers de sortie s
 | Lancer uniquement les tests rapides (skip les tests d'intégration ML) | `uv run pytest -m "not slow"` |
 | Couverture | `uv run pytest --cov=src --cov=api` |
 | Linter / formater | `uv run ruff check .` / `uv run ruff format .` |
-| Lancer l'API (à venir) | `uv run uvicorn api.main:app --reload` |
+| Lancer l'API | `uv run uvicorn api.main:app --reload` |
 
 ## État d'avancement
 
 Suivi détaillé dans [`documentation/plan-de-travail.md`](documentation/plan-de-travail.md). Le projet est découpé en 8 epics couvrant les 6 étapes de l'énoncé.
 
-**Livré** : Epic 1 (env), Epic 2 (ingestion + cleaning), Epic 3 (indexation FAISS parent-child).
+**Livré** : Epic 1 (env), Epic 2 (ingestion + cleaning), Epic 3 (indexation FAISS parent-child), Epic 4 (chaîne RAG LangChain + Mistral via Ollama), Epic 5 (API FastAPI : `/ask` + `/rebuild` + auth Bearer + Swagger).
 
-**En cours / à venir** : Epic 4 (chaîne RAG LangChain + Ollama), Epic 5 (API FastAPI), Epic 6 (évaluation Ragas), Epic 7 (Docker + CI), Epic 8 (rapport + soutenance).
+**En cours / à venir** : Epic 6 (évaluation Ragas), Epic 7 (Docker + CI), Epic 8 (rapport + soutenance).
 
 ## Variables d'environnement
 
-Pour l'instant aucune n'est requise (Ollama tourne en local sans clé). Si un `.env` devient nécessaire plus tard, un `.env.example` documentera les variables attendues.
+Copie [`.env.example`](.env.example) en `.env` (gitignored) et renseigne les valeurs nécessaires.
+
+| Variable | Requis pour | Notes |
+|---|---|---|
+| `ADMIN_TOKEN` | `POST /rebuild` | Bearer token statique requis pour déclencher la reconstruction de l'index. Génère-le avec `uv run python -c "import secrets; print(secrets.token_urlsafe(32))"`. Si absent, `/rebuild` répond `503` (fail-secure). |
+| `OLLAMA_HOST` | (optionnel) | URL d'Ollama. Défaut : `http://localhost:11434`. En Docker : `http://host.docker.internal:11434`. |
+| `OLLAMA_MODEL` | (optionnel) | Modèle servi. Défaut : `mistral-small:latest`. |
+| `LLM_TEMPERATURE` | (optionnel) | Température du LLM. Défaut : `0`. |
 
 ## Licence
 

@@ -13,17 +13,18 @@ Projet réalisé dans le cadre du parcours **OpenClassrooms — Ingénieur Machi
 | Orchestration RAG | LangChain |
 | Base vectorielle | FAISS (CPU) |
 | Embeddings | HuggingFace `sentence-transformers` (modèle multilingue, données en français) |
-| LLM de génération | **Mistral** servi localement via **Ollama** |
+| LLM de génération | **Mistral** via API cloud (défaut `mistral-medium-3.5`), avec fallback **Ollama** local pour usage hors-ligne |
 | API REST | FastAPI (+ Swagger auto sur `/docs`) |
 | Conteneurisation | Docker |
-| Évaluation | Ragas + jeu de Q/R annoté |
+| Évaluation | Ragas + jeu de 30 Q/R annoté |
 | Gestion deps | uv |
 
 ## Prérequis
 
 - **Python 3.12** (le projet est strictement pinné sur 3.12 via `.python-version` et `requires-python = ">=3.12,<3.13"` dans `pyproject.toml`)
 - **uv** — gestionnaire de paquets et d'environnement Python. Installation : voir [docs.astral.sh/uv/getting-started/installation](https://docs.astral.sh/uv/getting-started/installation/)
-- **Ollama** — runtime LLM local. Installation : voir [ollama.com/download](https://ollama.com/download)
+- **Une clé API Mistral** — création gratuite sur [console.mistral.ai](https://console.mistral.ai/). Le tier gratuit suffit pour le POC (50 req/min sur `mistral-medium-3.5`).
+- **Ollama** *(optionnel)* — runtime LLM local, uniquement si tu veux passer le RAG en mode hors-ligne via `LLM_PROVIDER=ollama`. Installation : voir [ollama.com/download](https://ollama.com/download).
 - **Docker** (pour la démo / livrable final, pas indispensable en développement)
 
 ## Installation
@@ -42,31 +43,30 @@ uv sync
 uv sync --no-dev
 ```
 
-### 2. Installer le modèle Mistral via Ollama
+### 2. Configurer le fichier `.env`
 
-Une fois Ollama installé et lancé :
+Copie `.env.example` en `.env` (gitignored) et renseigne au minimum :
+
+- **`MISTRAL_API_KEY`** — clé créée sur [console.mistral.ai](https://console.mistral.ai/). Obligatoire en `LLM_PROVIDER=mistral` (le défaut). Sans clé, `get_llm()` lève une erreur explicite au premier appel.
+- **`ADMIN_TOKEN`** — Bearer token statique requis pour `POST /rebuild`. Génère-le avec :
+
+  ```powershell
+  uv run python -c "import secrets; print(secrets.token_urlsafe(32))"
+  ```
+
+  Si absent au démarrage, l'API log un warning et `POST /rebuild` répond systématiquement `503` (fail-secure) — les autres endpoints restent fonctionnels.
+
+Voir la section [Variables d'environnement](#variables-denvironnement) pour la liste complète.
+
+### 3. *(Optionnel)* Installer Ollama pour le mode hors-ligne
+
+Seulement si tu veux faire tourner le RAG sans la cloud API Mistral. Une fois Ollama installé et lancé :
 
 ```powershell
 ollama pull mistral-small:latest
 ```
 
-Vérifier qu'Ollama répond bien sur le port par défaut :
-
-```powershell
-curl http://localhost:11434/api/tags
-```
-
-### 3. Configurer le fichier `.env`
-
-L'API a besoin d'un `ADMIN_TOKEN` pour protéger l'endpoint `POST /rebuild`. Copie `.env.example` en `.env` (gitignored), puis génère un token :
-
-```powershell
-uv run python -c "import secrets; print(secrets.token_urlsafe(32))"
-```
-
-et colle-le dans la variable `ADMIN_TOKEN`. Si le token n'est pas défini au démarrage, l'API log un warning et `POST /rebuild` répond systématiquement `503` (fail-secure) — les autres endpoints restent fonctionnels.
-
-Voir la section [Variables d'environnement](#variables-denvironnement) pour la liste complète.
+Puis dans `.env` : `LLM_PROVIDER=ollama`. La qualité d'extraction self-querying et la stabilité des prompts Ragas internes sont nettement moins bonnes qu'avec l'API cloud — décision documentée dans [`documentation/evaluation.md`](documentation/evaluation.md).
 
 ## Lancer l'API
 
@@ -109,8 +109,11 @@ OCProject7/
 ├── documentation/
 │   ├── enonce.txt              énoncé officiel du projet
 │   ├── plan-de-travail.md      suivi détaillé des epics et tâches
-│   └── data.md                 référence dataset : source, schéma, cleaning, index
-├── evaluation/         # Jeu de Q/R annoté + script Ragas
+│   ├── data.md                 référence dataset : source, schéma, cleaning, index
+│   └── evaluation.md           méthodologie Ragas, choix techniques, baseline, findings
+├── evaluation/         # Évaluation Ragas
+│   ├── qa_dataset.jsonl    30 Q/R annotées (5 catégories)
+│   ├── evaluate_rag.py     pipeline RAG + Ragas, exports CSV + JSON
 │   └── results/            sorties d'évaluation (ignorées)
 ├── scripts/            # Scripts I/O (wrappers autour de src/)
 │   ├── fetch_openagenda.py     téléchargement des données brutes
@@ -120,7 +123,7 @@ OCProject7/
 ├── src/                # Logique métier (fonctions pures, testables sans I/O)
 │   ├── data/clean.py           nettoyage des events
 │   ├── indexing/build_documents.py   conversion event → Document(s) LangChain
-│   └── rag/                    chaîne LangChain + wrapper Ollama
+│   └── rag/                    chaîne LangChain + dispatch LLM (Mistral / Ollama)
 ├── tests/              # Tests pytest
 ├── pyproject.toml      # Dépendances + config pytest (source de vérité)
 ├── uv.lock             # Lockfile des versions exactes (commité)
@@ -149,6 +152,25 @@ uv run python scripts/build_index.py
 
 Chaque script est idempotent et peut être lancé seul. Les fichiers de sortie sont datés (`<date>.jsonl`), donc relancer ne réécrit pas les anciens. Tous les détails (volumes, choix de filtres, paramètres de chunking, distribution des résultats) sont dans [`documentation/data.md`](documentation/data.md).
 
+## Évaluation Ragas
+
+Le pipeline d'évaluation charge le jeu de 30 Q/R annoté ([`evaluation/qa_dataset.jsonl`](evaluation/qa_dataset.jsonl)), fait tourner le `RAGService` sur chacune, calcule les 4 métriques Ragas (`faithfulness`, `answer_relevancy`, `context_precision`, `context_recall`) sur les 27 questions in-domain, et applique un check booléen sur les 3 questions hors-domaine. Sortie dans `evaluation/results/run_<timestamp>/` : un `per_question.csv` (détail par question + scores) et un `summary.json` (agrégats globaux et par catégorie).
+
+```powershell
+# Run complet (~30-35 min, dominé par le rate-limit Mistral gratuit)
+uv run python evaluation/evaluate_rag.py
+
+# Boucle de dev rapide (tirage seed=42)
+uv run python evaluation/evaluate_rag.py --sample 5
+
+# RAG seul, sans le judge Ragas (utile pour debug)
+uv run python evaluation/evaluate_rag.py --skip-ragas
+```
+
+La date système utilisée par l'extracteur self-querying est figée à `2026-06-02` (variable `EVAL_FROZEN_DATE`) pour que les questions à expressions temporelles relatives (« ce week-end », « cet été ») donnent les mêmes filtres extraits d'un run à l'autre. En production l'API ne fixe pas cette variable.
+
+Méthodologie complète, choix d'implémentation (3 patches `langchain-mistralai`, sérialisation côté Ragas, check OOD…), lecture détaillée de la baseline et findings priorisés : [`documentation/evaluation.md`](documentation/evaluation.md).
+
 ## Commandes courantes
 
 | Action | Commande |
@@ -162,14 +184,16 @@ Chaque script est idempotent et peut être lancé seul. Les fichiers de sortie s
 | Couverture | `uv run pytest --cov=src --cov=api` |
 | Linter / formater | `uv run ruff check .` / `uv run ruff format .` |
 | Lancer l'API | `uv run uvicorn api.main:app --reload` |
+| Évaluation Ragas (run complet) | `uv run python evaluation/evaluate_rag.py` |
+| Évaluation Ragas (rapide) | `uv run python evaluation/evaluate_rag.py --sample 5` |
 
 ## État d'avancement
 
 Suivi détaillé dans [`documentation/plan-de-travail.md`](documentation/plan-de-travail.md). Le projet est découpé en 8 epics couvrant les 6 étapes de l'énoncé.
 
-**Livré** : Epic 1 (env), Epic 2 (ingestion + cleaning), Epic 3 (indexation FAISS parent-child), Epic 4 (chaîne RAG LangChain + Mistral via Ollama), Epic 5 (API FastAPI : `/ask` + `/rebuild` + auth Bearer + Swagger).
+**Livré** : Epic 1 (env), Epic 2 (ingestion + cleaning), Epic 3 (indexation FAISS parent-child), Epic 4 (chaîne RAG LangChain + Mistral), Epic 5 (API FastAPI : `/ask` + `/rebuild` + auth Bearer + Swagger), Epic 6.1-6.4 (jeu de Q/R annoté, script Ragas, méthodologie documentée, baseline du 2026-06-02).
 
-**En cours / à venir** : Epic 6 (évaluation Ragas), Epic 7 (Docker + CI), Epic 8 (rapport + soutenance).
+**En cours / à venir** : Epic 6.5 (itération qualité), Epic 7 (Docker + CI), Epic 8 (rapport + soutenance).
 
 ## Variables d'environnement
 
@@ -178,9 +202,13 @@ Copie [`.env.example`](.env.example) en `.env` (gitignored) et renseigne les val
 | Variable | Requis pour | Notes |
 |---|---|---|
 | `ADMIN_TOKEN` | `POST /rebuild` | Bearer token statique requis pour déclencher la reconstruction de l'index. Génère-le avec `uv run python -c "import secrets; print(secrets.token_urlsafe(32))"`. Si absent, `/rebuild` répond `503` (fail-secure). |
+| `MISTRAL_API_KEY` | RAG en mode `mistral` (défaut) | Clé créée sur [console.mistral.ai](https://console.mistral.ai/). Le tier gratuit suffit pour le POC. Si absente quand `LLM_PROVIDER=mistral`, `get_llm()` lève une erreur explicite. |
+| `LLM_PROVIDER` | (optionnel) | `mistral` (défaut) ou `ollama`. Bascule le RAG + le judge Ragas d'un seul coup. |
+| `MISTRAL_MODEL` | (optionnel) | Override du modèle Mistral. Défaut : `mistral-medium-3.5` (50 req/min sur le tier gratuit). |
 | `OLLAMA_HOST` | (optionnel) | URL d'Ollama. Défaut : `http://localhost:11434`. En Docker : `http://host.docker.internal:11434`. |
-| `OLLAMA_MODEL` | (optionnel) | Modèle servi. Défaut : `mistral-small:latest`. |
-| `LLM_TEMPERATURE` | (optionnel) | Température du LLM. Défaut : `0`. |
+| `OLLAMA_MODEL` | (optionnel) | Modèle Ollama servi. Défaut : `mistral-small:latest`. |
+| `LLM_TEMPERATURE` | (optionnel) | Température du LLM (Mistral ou Ollama). Défaut : `0`. |
+| `EVAL_FROZEN_DATE` | Évaluation Ragas | Date système figée (format `YYYY-MM-DD`) pour reproductibilité des questions à expressions temporelles. Posée automatiquement à `2026-06-02` par `evaluate_rag.py`. Ignorée en production. |
 
 ## Licence
 

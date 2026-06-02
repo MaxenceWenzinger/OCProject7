@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-OpenClassrooms Project 7 — **POC RAG chatbot for the fictional client Puls-Events**, answering user questions about cultural events ingested from the Open Agenda API. Epics 1 (env setup), 2 (Open Agenda ingestion + cleaning), 3 (FAISS vectorization with parent-child chunking), 4 (LangChain + Mistral-via-Ollama RAG chain with self-querying pre-filter) and 5 (FastAPI exposing `/ask` and `/rebuild`) are **complete**. Current focus is Epic 6 (Ragas evaluation on an annotated Q/A test set).
+OpenClassrooms Project 7 — **POC RAG chatbot for the fictional client Puls-Events**, answering user questions about cultural events ingested from the Open Agenda API. Epics 1 (env setup), 2 (Open Agenda ingestion + cleaning), 3 (FAISS vectorization with parent-child chunking), 4 (LangChain + Mistral RAG chain with self-querying pre-filter) and 5 (FastAPI exposing `/ask` and `/rebuild`) are **complete**. Epic 6 is partially complete: 6.1 (annotated Q/A dataset, 30 questions in 5 categories), 6.2 (schema enrichment), 6.3 (`evaluate_rag.py` script with Ragas), 6.4 (`documentation/evaluation.md` + baseline run) are all **done**. Current focus is Epic 6.5 (quality iterations on the 5 findings identified by the baseline).
 
 See `documentation/plan-de-travail.md` for the full epic / task breakdown and what's done vs pending.
 
@@ -23,7 +23,7 @@ The brief from "Jérémy, Responsable technique" mandates a specific stack. Some
 ### Project-specific decisions (deviating from or refining the brief)
 
 - **Python 3.12** (the brief said ≥ 3.8 — we pinned higher for modern typing). Managed via **uv** (`pyproject.toml` + `uv.lock` are the source of truth ; `requirements.txt` will only be generated at the end as a deliverable).
-- **LLM**: Mistral local via **Ollama** (`langchain-ollama`), not the Mistral cloud API. Goal: offline demo, no API key, no internet dependency.
+- **LLM**: **Mistral via Cloud API** (`langchain-mistralai`, default `mistral-medium-3.5`). Initial choice was Mistral-small local via Ollama for an offline POC ; switched to API on 2026-06-02 after Epic 6.3 revealed that mistral-small produced (a) hallucinated dates in self-querying (q01 « Quand a lieu X » → fabricated date_after/date_before), (b) JSON-malformed outputs that Ragas couldn't parse (~40 % failure on internal prompts). Free tier rate limits actually checked via API headers — `mistral-medium-3.5` retained over `mistral-large-latest` (4 req/min) and `mistral-medium-latest` (2508, 23 req/min) because it offers 50 req/min and lower /ask latency. Ollama remains supported via `LLM_PROVIDER=ollama` for offline experiments. Demo Docker is now online-only — documented in the report as a tradeoff.
 - **Embeddings**: `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` (384 dim, 128-token window), loaded locally via `langchain-huggingface`. Picked over `intfloat/multilingual-e5-base` (~9× slower on CPU) because parent-child chunking makes the short window a non-issue. See `documentation/data.md` for the benchmark.
 - **Chunking strategy**: **parent-child**. Each event's `page_content` is split into N chunks of ≤120 MiniLM tokens with 24-token overlap. Chunks get embedded into FAISS; at retrieval time we dedup by `parent_uid` and serve the **full parent Document** to the LLM. Mentor's recommendation, calibrated against the dataset's token distribution.
 - **Geographic scope**: **France entière**, not Île-de-France as the brief suggested. Validated with the professor.
@@ -43,7 +43,7 @@ src/
   indexing/
     build_documents.py             event → Document(s) (parent + chunks)
   rag/
-    llm.py                         get_llm() → ChatOllama (mistral-small:latest)
+    llm.py                         get_llm() → ChatMistralAI (default) or ChatOllama, dispatched by LLM_PROVIDER
     chain.py                       LCEL chain {context, question} → str (prompt + LLM + parser)
     query_parser.py                self-querying LLM extractor → QueryFilters (Pydantic, today-aware)
     retrieval.py                   load index/parent_store/LUT + retrieve_parents (pre-filter incl. dates)
@@ -70,9 +70,13 @@ documentation/
   enonce.txt                       authoritative spec, in French — "the brief"
   plan-de-travail.md               epic + task breakdown, decisions log
   data.md                          dataset + index reference: source, schema, cleaning, FAISS build
+  evaluation.md                    Ragas methodology, implementation choices, baseline run, findings
   Template+de+rapport+technique.docx   technical report template
-evaluation/                        Q/A dataset + Ragas evaluation (Epic 6, not started yet)
-.env / .env.example                ADMIN_TOKEN for /rebuild auth (.env gitignored, .env.example committed)
+evaluation/
+  qa_dataset.jsonl                 30 hand-annotated Q/R in 5 categories
+  evaluate_rag.py                  RAGService + Ragas runner; CSV+JSON outputs; `--sample N`, `--skip-ragas`
+  results/                         dated subfolders `run_<ts>/` with per_question.csv + summary.json (gitignored)
+.env / .env.example                ADMIN_TOKEN, MISTRAL_API_KEY (.env gitignored, .env.example committed)
 ```
 
 **Conventions** : business logic in `src/`, runnable scripts in `scripts/`. The split lets `clean.py`, `build_documents.py` and the `rag/` modules be tested in isolation with no filesystem dependency. Don't put logic in `scripts/` beyond argparse + log + I/O orchestration.
@@ -101,8 +105,10 @@ Graded artifacts, not nice-to-haves:
 ## Environment
 
 - `uv sync` is enough to install everything. Run commands via `uv run …`.
-- **`.env` is required** (gitignored). Copy `.env.example` and fill `ADMIN_TOKEN` (Bearer token for `POST /rebuild`). Generate one via `uv run python -c "import secrets; print(secrets.token_urlsafe(32))"`. If `ADMIN_TOKEN` is unset at startup, the lifespan logs a loud warning and `/rebuild` answers `503` (fail-secure). No Mistral cloud key is needed (Ollama is local).
-- **Ollama is a separate prerequisite** (not in `uv sync`). The README documents `ollama pull mistral-small:latest`.
+- **`.env` is required** (gitignored). Copy `.env.example` and fill:
+  - `ADMIN_TOKEN` (Bearer token for `POST /rebuild`). Generate via `uv run python -c "import secrets; print(secrets.token_urlsafe(32))"`. If unset at startup, the lifespan logs a loud warning and `/rebuild` answers `503` (fail-secure).
+  - `MISTRAL_API_KEY` (obligatory when `LLM_PROVIDER=mistral`, the default). Create at https://console.mistral.ai/. If unset and provider is mistral, `get_llm()` raises a clear `RuntimeError` at first call.
+- **Ollama is an optional prerequisite** for `LLM_PROVIDER=ollama` (offline fallback, not in `uv sync`). Install via `ollama pull mistral-small:latest`.
 
 ## Working notes
 
@@ -130,12 +136,13 @@ These are non-obvious things about the data — saving you the discovery time:
 ### RAG chain specifics
 
 - **LCEL, not `RetrievalQA`**: the legacy class is deprecated since LangChain 0.2 and can't host our parent-child dedup. The chain in `chain.py` is intentionally minimal (`{context, question} | prompt | llm | StrOutputParser`) — retrieval lives in Python (`retrieval.py`), invoked by `RAGService` before the chain. Tradeoff is documented in `plan-de-travail.md` (Epic 4 decisions).
-- **Self-querying via LLM, today-aware**: `query_parser.py` uses `ChatOllama.with_structured_output(QueryFilters)` to extract `{city, region, year, date_after, date_before}`. The system prompt receives the current date and weekday via `RunnablePassthrough.assign` on each invocation (not frozen at startup — the API may run for days). The LLM is told to resolve relative dates (« ce dimanche », « cet été ») into ISO dates, to infer `date_after = today` when the main clause is present/future and no date is given, and to inspect the main clause's grammatical tense — not subordinate context clauses (e.g. « j'ai entendu qu'il y avait... pourrais-tu m'en lister » is a future request). « N'importe quand » is the explicit escape hatch for nulling both date bounds. If extraction throws, `RAGService.answer` degrades gracefully to empty filters.
+- **Self-querying via LLM, today-aware**: `query_parser.py` uses `get_llm().with_structured_output(QueryFilters)` to extract `{city, region, year, date_after, date_before}` — the underlying chat model is whatever `LLM_PROVIDER` resolves to. The system prompt receives the current date and weekday via `RunnablePassthrough.assign` on each invocation (not frozen at startup — the API may run for days). Date resolution lookup order: env var `EVAL_FROZEN_DATE` (set by `evaluate_rag.py` for reproducibility, unset in production) → `date.today()`. The LLM is told to resolve relative dates (« ce dimanche », « cet été ») into ISO dates, to infer `date_after = today` when the main clause is present/future and no date is given, and to inspect the main clause's grammatical tense — not subordinate context clauses (e.g. « j'ai entendu qu'il y avait... pourrais-tu m'en lister » is a future request). « N'importe quand » is the explicit escape hatch for nulling both date bounds. If extraction throws, `RAGService.answer` degrades gracefully to empty filters.
 - **Pre-filter on FAISS, all five fields**: FAISS doesn't support metadata filtering natively — LangChain's `filter=` parameter is post-filter, which broke for rare cities (e.g. `city="Reims"` returned 0 because the 200 most-similar chunks to "jazz" are all Paris/Lyon). We do real pre-filtering via a `uid → list[faiss_id]` LUT built once (~1.6s) and disk-cached as `data/index/uid_to_faiss_ids.pkl` with mtime invalidation against `index.faiss`. At query time: select allowed uids from parent_store, expand to faiss_ids, `reconstruct_batch` the vectors, compute L2 distance in numpy. ~370ms/query. **All five filters (city / region / year / date_after / date_before) are evaluated as pre-filter** against the parent metadata (`first_date` / `last_date` overlap with the requested window). Date post-filtering was tried first but was inadequate: on Paris × June-Oct 2026, the top-15 most-similar chunks contained ~1 in the date window, so the user got 1 source instead of 10. Iterating the parent_store on dates is cheap (~same complexity as city/region).
 - **Fail-open retrieval**: if the extracted filter returns 0 parents, we re-run the similarity search with no filter and set `filter_relaxed=True` in the returned dict. A bad filter (typo, hallucinated city) shouldn't blackhole the response.
 - **Region aliases**: the dataset has both French and English region names (`"Bretagne"` vs `"Brittany"`, `"Normandie"` vs `"Normandy"`). `retrieval.REGION_ALIASES` normalizes English to French; combined with accent-insensitive matching this absorbs the variants.
 - **`RAGService.answer(q)` returns rich dict**: `{answer, sources, filters_used, filter_relaxed, timings}`. `timings` breaks down extract/retrieve/generate/total in ms — useful for the technical report and for the upcoming FastAPI endpoint to expose.
-- **Two LLM calls per `/ask`**: extract (~7s) + generate (~11s) = ~18s warm on the dev machine. Acceptable for POC, documented in `plan-de-travail.md`. If we ever want to cut latency: stream the generation (perceived latency ~2s), or use a smaller model for extraction only.
+- **Two LLM calls per `/ask`**: with Mistral API (`mistral-medium-3.5`, default) ~1s extract + ~2-3s generate = ~3-5s warm in isolation. Under Ragas load (concurrent quota pressure), observed up to ~13s/question on the baseline run. With Ollama (`mistral-small`, opt-in) ~7s + ~11s = ~18s warm on the dev machine.
+- **LLM provider dispatch in `llm.py`**: `get_llm()` reads `LLM_PROVIDER` (`mistral` default, `ollama` fallback) and returns the right `BaseChatModel`. All chains (`chain.py`, `query_parser.py`) and the Ragas judge use it — switching the env var changes the whole stack at once. Imports of `ChatMistralAI` and `ChatOllama` are lazy inside the dispatch functions so a missing prereq doesn't break import time. When provider is `mistral`, `_build_mistral` also installs three idempotent monkey-patches required for Ragas + Mistral free-tier interop: retry on HTTP 429/5xx, strip of markdown ` ```json ``` ` fences around outputs, and recursive aggregation of nested `token_usage` dicts (the latter is a real `langchain-mistralai` bug surfaced by `answer_relevancy`'s batch generation). All three live in `src/rag/llm.py` and are detailed in `documentation/evaluation.md`.
 - **Empty `__init__.py` files in `src/rag/`** — don't re-export anything from there. Each module is imported directly (`from src.rag.service import RAGService`).
 
 ### API specifics

@@ -16,6 +16,7 @@ sur mistral-small. Acceptable au regard de la latence totale du RAG.
 
 from __future__ import annotations
 
+import os
 from datetime import date
 from typing import Optional
 
@@ -140,8 +141,16 @@ def _today_context() -> dict[str, str]:
 
     Recalculé à chaque appel : `RAGService` instancie l'extracteur une
     seule fois mais peut tourner plusieurs jours, on ne veut pas figer
-    la date au démarrage."""
-    today = date.today()
+    la date au démarrage.
+
+    Si l'env var `EVAL_FROZEN_DATE` est définie (format `YYYY-MM-DD`),
+    on l'utilise à la place de `date.today()`. Cette porte est uniquement
+    là pour rendre les runs d'évaluation reproductibles dans le temps
+    (les ground truths du `qa_dataset.jsonl` ont été annotés avec une
+    date système précise). En prod, la var est absente et le comportement
+    est identique à `date.today()`."""
+    frozen = os.environ.get("EVAL_FROZEN_DATE")
+    today = date.fromisoformat(frozen) if frozen else date.today()
     return {
         "today": today.isoformat(),
         "weekday": _WEEKDAY_FR[today.weekday()],

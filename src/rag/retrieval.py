@@ -4,7 +4,7 @@ Trois responsabilités :
 
 1. **Chargement** de l'index FAISS, du `parent_store` (`uid → Document parent`)
    et d'un **LUT inverse** `uid → list[faiss_id]` mis en cache disque.
-2. **Pre-filtering vrai** sur city/region/year : au lieu de laisser FAISS
+2. **Pre-filtering vrai** sur city/region : au lieu de laisser FAISS
    ramener les k plus similaires puis post-filtrer (qui peut renvoyer 0
    résultat pour une ville rare comme Reims), on calcule en amont la
    liste des `faiss_id` autorisés via le LUT, on reconstruit leurs
@@ -171,7 +171,7 @@ def _select_allowed_uids(
 ) -> set[str] | None:
     """Calcule l'ensemble des `uid` qui passent les filtres exacts.
 
-    Champs filtrés : `city`, `region`, `year`, `date_after`, `date_before`.
+    Champs filtrés : `city`, `region`, `date_after`, `date_before`.
     Renvoie `None` si aucun de ces filtres n'est défini (= « pas de
     pre-filter, on tombe sur la voie standard »). Sinon, itère sur les
     252 901 events du `parent_store` (~50ms) et garde ceux qui matchent.
@@ -179,19 +179,19 @@ def _select_allowed_uids(
     Convention dates : un event « chevauche » la fenêtre `[date_after,
     date_before]` si `last_date >= date_after` ET `first_date <=
     date_before`. Les dates ISO 8601 se comparent lexicographiquement
-    sur les 10 premiers caractères (YYYY-MM-DD)."""
+    sur les 10 premiers caractères (YYYY-MM-DD). Une année entière voulue
+    par l'utilisateur arrive ici sous forme de bornes (`YYYY-01-01` /
+    `YYYY-12-31`), résolues en amont par l'extracteur self-querying."""
     has_city = filters.city is not None
     has_region = filters.region is not None
-    has_year = filters.year is not None
     has_date_after = filters.date_after is not None
     has_date_before = filters.date_before is not None
 
-    if not (has_city or has_region or has_year or has_date_after or has_date_before):
+    if not (has_city or has_region or has_date_after or has_date_before):
         return None
 
     city_norm = _normalize(filters.city) if has_city else None
     region_norm = _normalize_region(filters.region) if has_region else None
-    year = filters.year
     date_after = filters.date_after
     date_before = filters.date_before
 
@@ -201,8 +201,6 @@ def _select_allowed_uids(
         if has_city and _normalize(meta.get("location_city")) != city_norm:
             continue
         if has_region and _normalize_region(meta.get("location_region")) != region_norm:
-            continue
-        if has_year and meta.get("event_year") != year:
             continue
         if has_date_after:
             last = meta.get("last_date") or meta.get("first_date")
@@ -238,7 +236,7 @@ def retrieve_parents(
     Pipeline (deux voies selon les filtres) :
 
     **Voie pre-filter** (au moins un filtre extrait — city, region,
-    year, date_after ou date_before) :
+    date_after ou date_before) :
     1. Calcule `allowed_uids` depuis le parent_store (itération ~50ms).
     2. Récupère `allowed_faiss_ids` via le LUT inverse (O(n_uids)).
     3. Reconstruit les vecteurs correspondants depuis FAISS.

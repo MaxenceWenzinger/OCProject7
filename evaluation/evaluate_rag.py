@@ -3,9 +3,15 @@
 Charge `evaluation/qa_dataset.jsonl`, fait tourner `RAGService` sur chaque
 question, calcule les métriques Ragas (faithfulness, answer_relevancy,
 context_precision, context_recall) sur les questions in-domain, et un
-check booléen séparé sur les questions out_of_domain. Exporte un CSV
+check booléen séparé sur la (les) question(s) out-of-domain. Exporte un CSV
 détaillé (une ligne par question) + un JSON agrégé dans
 `evaluation/results/run_<timestamp>/`.
+
+Une question est considérée out-of-domain quand son champ `contexts_uids`
+est vide (`[]`) : aucun event cible n'est attendu, donc la bonne réponse
+est un refus. Ces questions sont scorées par regex (cf. `score_ood`) et
+exclues du calcul Ragas — Ragas évalue mal un refus (contextes vides →
+NaN sur faithfulness/CP/CR, et `answer_relevancy` pénalise un refus correct).
 
 Date système figée via `EVAL_FROZEN_DATE` (défaut `2026-06-02`,
 date d'annotation du dataset) pour que les questions à expressions
@@ -93,28 +99,33 @@ OOD_REFUSAL_PATTERN = re.compile(
 )
 
 
+def is_out_of_domain(record: dict) -> bool:
+    """Une question est out-of-domain quand aucun contexte cible n'est attendu.
+
+    `contexts_uids` vide (`[]`) signifie « il ne faut récupérer aucun event,
+    la bonne réponse est un refus ». C'est le seul marqueur du jeu de test :
+    pas de champ `category` ni de flag dédié."""
+    return not record["contexts_uids"]
+
+
 @dataclass
 class QAEntry:
     """Une ligne du `qa_dataset.jsonl` parsée."""
 
     id: str
-    category: str
     question: str
     ground_truth: str
-    expected_contexts: list[str]
+    contexts_uids: list[str]
     expected_filter: dict
-    notes: str
 
     @classmethod
     def from_dict(cls, d: dict) -> QAEntry:
         return cls(
             id=d["id"],
-            category=d["category"],
             question=d["question"],
             ground_truth=d["ground_truth"],
-            expected_contexts=d["expected_contexts"],
+            contexts_uids=d["contexts_uids"],
             expected_filter=d["expected_filter"],
-            notes=d.get("notes", ""),
         )
 
 
@@ -141,8 +152,8 @@ def run_rag_on_entries(
     métadonnées d'analyse (UIDs des sources, filtres extraits, timings)."""
     records = []
     for i, entry in enumerate(entries, 1):
-        log.info("[%d/%d] %s (%s) — %s", i, len(entries), entry.id,
-                 entry.category, entry.question[:80])
+        log.info("[%d/%d] %s — %s", i, len(entries), entry.id,
+                 entry.question[:80])
         t0 = time.perf_counter()
         result = service.answer(entry.question)
         elapsed = time.perf_counter() - t0
@@ -152,12 +163,10 @@ def run_rag_on_entries(
 
         records.append({
             "id": entry.id,
-            "category": entry.category,
             "question": entry.question,
             "ground_truth": entry.ground_truth,
-            "expected_contexts": entry.expected_contexts,
+            "contexts_uids": entry.contexts_uids,
             "expected_filter": entry.expected_filter,
-            "notes": entry.notes,
             "answer": result["answer"],
             "retrieved_contexts": retrieved_contexts,
             "retrieved_uids": retrieved_uids,
@@ -172,13 +181,14 @@ def run_rag_on_entries(
 
 
 def score_ood(records: list[dict]) -> list[dict]:
-    """Score les réponses out_of_domain : la réponse contient-elle le refus ?
+    """Score les réponses out-of-domain : la réponse contient-elle le refus ?
 
     Renvoie une liste de dicts `{id, passed, answer_excerpt}` pour les
-    seuls records OOD. Le pattern est défini en haut du module."""
+    seuls records OOD (cf. `is_out_of_domain`). Le pattern est défini en
+    haut du module."""
     results = []
     for r in records:
-        if r["category"] != "out_of_domain":
+        if not is_out_of_domain(r):
             continue
         passed = bool(OOD_REFUSAL_PATTERN.search(r["answer"]))
         results.append({
@@ -279,9 +289,9 @@ def write_per_question_csv(
 ) -> None:
     """Écrit le détail par question dans un CSV.
 
-    Une ligne par question avec : id, category, question, answer (tronquée),
+    Une ligne par question avec : id, question, answer (tronquée),
     retrieved_uids, filters_used, filter_relaxed, elapsed_s, et les scores
-    Ragas (NaN pour OOD) + ood_passed (NaN pour in-domain)."""
+    Ragas (vide pour OOD) + ood_passed (vide pour in-domain)."""
     import csv
 
     ood_passed_by_id = {r["id"]: r["passed"] for r in ood_results}
@@ -290,8 +300,8 @@ def write_per_question_csv(
     with out_path.open("w", encoding="utf-8", newline="") as fh:
         writer = csv.writer(fh)
         writer.writerow([
-            "id", "category", "question", "answer",
-            "retrieved_uids", "expected_contexts",
+            "id", "question", "answer",
+            "retrieved_uids", "contexts_uids",
             "filters_used", "expected_filter", "filter_relaxed",
             *metric_names, "ood_passed",
             "elapsed_s",
@@ -300,11 +310,10 @@ def write_per_question_csv(
             scores = scores_by_id.get(r["id"], {})
             writer.writerow([
                 r["id"],
-                r["category"],
                 r["question"],
                 r["answer"][:500],
                 "|".join(r["retrieved_uids"]),
-                "|".join(r["expected_contexts"]),
+                "|".join(r["contexts_uids"]),
                 json.dumps(r["filters_used"], ensure_ascii=False),
                 json.dumps(r["expected_filter"], ensure_ascii=False),
                 r["filter_relaxed"],
@@ -326,34 +335,26 @@ def write_summary_json(
     frozen_date: str,
     sample_n: int | None,
 ) -> None:
-    """Écrit l'agrégat (moyennes globales + par catégorie + OOD) en JSON."""
+    """Écrit l'agrégat (moyennes globales in-domain + bloc OOD) en JSON."""
     metric_names = ["faithfulness", "answer_relevancy", "context_precision", "context_recall"]
 
-    # Agrégats globaux (in-domain uniquement)
-    in_domain = [r for r in records if r["category"] != "out_of_domain"]
+    # Agrégats globaux (in-domain uniquement). Avec si peu de questions, on ne
+    # ventile plus par catégorie (la notion a été retirée du jeu de test) :
+    # une seule moyenne in-domain + un bloc OOD à part.
+    in_domain = [r for r in records if not is_out_of_domain(r)]
     global_means = {
         m: _mean([scores_by_id.get(r["id"], {}).get(m) for r in in_domain])
         for m in metric_names
     }
 
-    # Agrégats par catégorie
-    by_category: dict[str, dict[str, float | int]] = {}
-    cats = sorted({r["category"] for r in records})
-    for cat in cats:
-        cat_records = [r for r in records if r["category"] == cat]
-        if cat == "out_of_domain":
-            n_passed = sum(1 for o in ood_results if o["passed"])
-            by_category[cat] = {
-                "n": len(cat_records),
-                "n_passed": n_passed,
-                "pass_rate": n_passed / len(cat_records) if cat_records else None,
-            }
-        else:
-            by_category[cat] = {"n": len(cat_records)}
-            for m in metric_names:
-                by_category[cat][m] = _mean(
-                    [scores_by_id.get(r["id"], {}).get(m) for r in cat_records]
-                )
+    # Bloc out-of-domain : scoré par regex (cf. score_ood), pas par Ragas.
+    n_ood = len(ood_results)
+    n_passed = sum(1 for o in ood_results if o["passed"])
+    out_of_domain = {
+        "n": n_ood,
+        "n_passed": n_passed,
+        "pass_rate": n_passed / n_ood if n_ood else None,
+    }
 
     # Métadonnées du run (commit, date système figée, etc.). Les défauts
     # affichés ici doivent rester en phase avec ceux de `src/rag/llm.py`.
@@ -376,7 +377,7 @@ def write_summary_json(
         "n_questions_in_domain": len(in_domain),
         "n_questions_out_of_domain": len(ood_results),
         "global_means_in_domain": global_means,
-        "by_category": by_category,
+        "out_of_domain": out_of_domain,
         "timings": {
             "mean_elapsed_s": _mean([r["elapsed_s"] for r in records]),
             "total_rag_s": sum(r["elapsed_s"] for r in records),
@@ -464,7 +465,7 @@ def main(argv: list[str] | None = None) -> int:
     log.info("OOD : %d/%d refus correctement formulés",
              sum(1 for r in ood_results if r["passed"]), len(ood_results))
 
-    in_domain_records = [r for r in records if r["category"] != "out_of_domain"]
+    in_domain_records = [r for r in records if not is_out_of_domain(r)]
     if args.skip_ragas or not in_domain_records:
         scores_by_id = {}
         log.info("Ragas sauté (--skip-ragas ou 0 question in-domain)")

@@ -1,26 +1,36 @@
 """Tests d'intégration bout-en-bout de la chaîne RAG.
 
 Exerce `RAGService.answer()` sur le mini-index partagé (`built_index`)
-avec un vrai serveur Ollama. Si Ollama n'est pas joignable au démarrage
-de la session, tous les tests E2E sont skippés proprement — la fixture
-`ollama_available` fait un ping HTTP et appelle `pytest.skip(...)` si
-le serveur ne répond pas. Permet à la CI sans Ollama de ne pas planter.
+avec le vrai LLM configuré par `LLM_PROVIDER` (Mistral via API cloud par
+défaut, Ollama en fallback offline). Si le LLM n'est pas disponible au
+démarrage de la session, tous les tests E2E sont skippés proprement —
+la fixture `llm_available` vérifie la disponibilité selon le provider
+et appelle `pytest.skip(...)` sinon :
+
+- provider `mistral` : skip si `MISTRAL_API_KEY` est absent (cas CI sans
+  secret) ;
+- provider `ollama`  : skip si le serveur local ne répond pas au ping.
+
+Permet à la CI sans clé Mistral ni Ollama de ne pas planter.
 
 Les assertions sont volontairement légères (mots-clés présents dans la
 réponse, présence dans les sources, structure du dict retourné). La
 validation rigoureuse de la qualité des réponses est le rôle de Ragas
 dans l'Epic 6, pas de ces tests d'intégration.
 
-Marqué `slow` : un appel `answer()` prend ~15-30s (extraction LLM +
-retrieval + génération LLM). Skip via `pytest -m "not slow"`.
+Marqué `slow` : un appel `answer()` prend ~3-30s (extraction LLM +
+retrieval + génération LLM, selon le provider). Skip via
+`pytest -m "not slow"`.
 """
 
 from __future__ import annotations
 
+import os
+
 import pytest
 import requests
 
-from src.rag.llm import DEFAULT_BASE_URL
+from src.rag.llm import DEFAULT_OLLAMA_HOST, DEFAULT_PROVIDER
 
 pytestmark = pytest.mark.slow
 
@@ -31,27 +41,42 @@ pytestmark = pytest.mark.slow
 
 
 @pytest.fixture(scope="session")
-def ollama_available() -> bool:
-    """Pings le serveur Ollama au démarrage de session.
+def llm_available() -> bool:
+    """Vérifie au démarrage de session que le LLM du provider actif est joignable.
 
-    Si pas de réponse en 2s, skip tous les tests qui consomment cette
-    fixture. Évite que les tests CI sans Ollama plantent — ils
-    s'affichent comme `SKIPPED` au lieu de `FAILED`."""
-    try:
-        r = requests.get(f"{DEFAULT_BASE_URL}/api/tags", timeout=2)
-        if r.status_code != 200:
-            pytest.skip(f"Ollama répond {r.status_code}, tests RAG skippés")
+    Selon `LLM_PROVIDER` (défaut `mistral`) :
+    - `mistral` : exige `MISTRAL_API_KEY` (pas d'appel réseau ici, on ne
+      veut pas consommer de quota juste pour un health-check) ;
+    - `ollama`  : ping `OLLAMA_HOST/api/tags` avec un timeout de 2s.
+
+    Skip tous les tests qui consomment cette fixture si indisponible — ils
+    s'affichent comme `SKIPPED` au lieu de `FAILED` (CI sans secret/serveur)."""
+    provider = (os.getenv("LLM_PROVIDER") or DEFAULT_PROVIDER).lower()
+
+    if provider == "mistral":
+        if not os.getenv("MISTRAL_API_KEY"):
+            pytest.skip("MISTRAL_API_KEY absent, tests RAG (provider mistral) skippés")
         return True
-    except (requests.ConnectionError, requests.Timeout) as exc:
-        pytest.skip(f"Ollama injoignable ({exc}), tests RAG skippés")
+
+    if provider == "ollama":
+        base_url = os.getenv("OLLAMA_HOST", DEFAULT_OLLAMA_HOST)
+        try:
+            r = requests.get(f"{base_url}/api/tags", timeout=2)
+            if r.status_code != 200:
+                pytest.skip(f"Ollama répond {r.status_code}, tests RAG skippés")
+            return True
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            pytest.skip(f"Ollama injoignable ({exc}), tests RAG skippés")
+
+    pytest.skip(f"LLM_PROVIDER={provider!r} non géré par les tests RAG")
 
 
 @pytest.fixture(scope="module")
-def rag_service(built_index, ollama_available):
+def rag_service(built_index, llm_available):
     """Instancie RAGService une seule fois pour le module.
 
     Coût ~15s (chargement embeddings + index + parent_store + LUT +
-    connexion Ollama). Réutilisé par tous les tests du module."""
+    init du client LLM). Réutilisé par tous les tests du module."""
     from src.rag.service import RAGService
 
     index_dir, _ = built_index

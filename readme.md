@@ -16,7 +16,7 @@ Projet réalisé dans le cadre du parcours **OpenClassrooms — Ingénieur Machi
 | LLM de génération | **Mistral** via API cloud (défaut `mistral-medium-3.5`), avec fallback **Ollama** local pour usage hors-ligne |
 | API REST | FastAPI (+ Swagger auto sur `/docs`) |
 | Conteneurisation | Docker |
-| Évaluation | Ragas + jeu de 30 Q/R annoté |
+| Évaluation | Ragas + jeu de 7 Q/R annoté |
 | Gestion deps | uv |
 
 ## Prérequis
@@ -112,7 +112,7 @@ OCProject7/
 │   ├── data.md                 référence dataset : source, schéma, cleaning, index
 │   └── evaluation.md           méthodologie Ragas, choix techniques, baseline, findings
 ├── evaluation/         # Évaluation Ragas
-│   ├── qa_dataset.jsonl    30 Q/R annotées (5 catégories)
+│   ├── qa_dataset.jsonl    7 Q/R annotées (6 in-domain + 1 hors-domaine)
 │   ├── evaluate_rag.py     pipeline RAG + Ragas, exports CSV + JSON
 │   └── results/            sorties d'évaluation (ignorées)
 ├── scripts/            # Scripts I/O (wrappers autour de src/)
@@ -154,14 +154,14 @@ Chaque script est idempotent et peut être lancé seul. Les fichiers de sortie s
 
 ## Évaluation Ragas
 
-Le pipeline d'évaluation charge le jeu de 30 Q/R annoté ([`evaluation/qa_dataset.jsonl`](evaluation/qa_dataset.jsonl)), fait tourner le `RAGService` sur chacune, calcule les 4 métriques Ragas (`faithfulness`, `answer_relevancy`, `context_precision`, `context_recall`) sur les 27 questions in-domain, et applique un check booléen sur les 3 questions hors-domaine. Sortie dans `evaluation/results/run_<timestamp>/` : un `per_question.csv` (détail par question + scores) et un `summary.json` (agrégats globaux et par catégorie).
+Le pipeline d'évaluation charge le jeu de 7 Q/R annoté ([`evaluation/qa_dataset.jsonl`](evaluation/qa_dataset.jsonl)), fait tourner le `RAGService` sur chacune, calcule les 4 métriques Ragas (`faithfulness`, `answer_relevancy`, `context_precision`, `context_recall`) sur les 6 questions in-domain, et applique un check booléen sur la question hors-domaine (détectée par son `contexts_uids` vide). Sortie dans `evaluation/results/run_<timestamp>/` : un `per_question.csv` (détail par question + scores) et un `summary.json` (agrégats in-domain + bloc out-of-domain).
 
 ```powershell
 # Run complet (~30-35 min, dominé par le rate-limit Mistral gratuit)
 uv run python evaluation/evaluate_rag.py
 
 # Boucle de dev rapide (tirage seed=42)
-uv run python evaluation/evaluate_rag.py --sample 5
+uv run python evaluation/evaluate_rag.py --sample 3
 
 # RAG seul, sans le judge Ragas (utile pour debug)
 uv run python evaluation/evaluate_rag.py --skip-ragas

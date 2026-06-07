@@ -21,6 +21,21 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _load_env() -> None:
+    """Charge `.env` pour toute la session de tests.
+
+    Les tests E2E (`test_rag.py`) ont besoin de `MISTRAL_API_KEY` (provider
+    par défaut) ou `LLM_PROVIDER=ollama` ; `os.getenv` ne lit pas `.env`
+    automatiquement, contrairement à l'API et au runner d'éval qui appellent
+    `load_dotenv` explicitement. On reproduit ce comportement ici pour que
+    `pytest` local voie la clé. En CI, la clé vient des secrets (env réel),
+    `.env` est absent et `load_dotenv` est silencieux."""
+    from dotenv import load_dotenv
+
+    load_dotenv(PROJECT_ROOT / ".env")
+
+
 # 5 events réalistes avec thématiques distinctes pour valider que le retrieval
 # discrimine. Chaque event a un mot-clé unique qu'aucun autre ne contient,
 # et des metadata variées (ville, région, dates) pour exercer le pre-filter.

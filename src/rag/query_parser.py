@@ -2,8 +2,10 @@
 
 Approche : on demande au LLM (Mistral via Ollama) d'extraire les
 contraintes structurées exprimées en langage naturel — ville, région,
-année, plage de dates — en s'appuyant sur `with_structured_output` de
-LangChain, qui contraint la sortie à un schéma Pydantic.
+plage de dates — en s'appuyant sur `with_structured_output` de
+LangChain, qui contraint la sortie à un schéma Pydantic. Une année
+entière mentionnée n'est pas un champ dédié : elle est résolue par le
+LLM en bornes `date_after`/`date_before` (1er janvier → 31 décembre).
 
 Tout champ non extrait reste `None` ; le caller (`retrieval.py`)
 décide quels filtres appliquer effectivement. La normalisation des
@@ -46,8 +48,6 @@ Ne déduis pas la ville depuis une région ou un lieu (ex : "Bretagne" → city 
 - `region` : nom de région française mentionné (ex : "Bretagne", \
 "Île-de-France", "Auvergne-Rhône-Alpes"). Utilise l'orthographe officielle \
 française avec accents.
-- `year` : année entière mentionnée (ex : 2025, 2026). Uniquement si une \
-année précise est dite ; sinon `null`.
 - `date_after` : borne basse au format `YYYY-MM-DD`.
 - `date_before` : borne haute au format `YYYY-MM-DD`.
 
@@ -62,6 +62,12 @@ Choisis l'occurrence à venir la plus proche pour les expressions ambiguës \
 2. Une période nommée sans année ("entre juin et octobre", "en novembre") \
 réfère à la prochaine occurrence à venir de cette période. Si on est déjà \
 dans la période ou après, prends l'année prochaine.
+
+2bis. Une année entière explicitement mentionnée ("en 2026", "événements de \
+2025") se traduit par une fenêtre complète : `date_after = "YYYY-01-01"` et \
+`date_before = "YYYY-12-31"`. Combine-la avec un mois ou une période si la \
+question en précise un ("festivals en juillet 2025" → "2025-07-01" → \
+"2025-07-31").
 
 3. Analyse le TEMPS GRAMMATICAL de la requête principale (pas des \
 subordonnées de contexte) :
@@ -83,8 +89,8 @@ ni des règles ci-dessus.
 
 Exemples (en supposant aujourd'hui = 2026-05-27, mercredi) :
 - "Concert de jazz à Reims" → city="Reims", date_after="2026-05-27"
-- "Expos en Bretagne en 2026" → region="Bretagne", year=2026, \
-date_after="2026-05-27" (présent, futur implicite)
+- "Expos en Bretagne en 2026" → region="Bretagne", date_after="2026-01-01", \
+date_before="2026-12-31" (année entière → fenêtre complète)
 - "Quels festivals en juillet 2025 ?" → date_after="2025-07-01", \
 date_before="2025-07-31" (année explicite, on respecte)
 - "Expositions à Paris entre juin et octobre" → city="Paris", \
@@ -92,7 +98,7 @@ date_after="2026-06-01", date_before="2026-10-31" (prochaine occurrence)
 - "Que se passe-t-il ce week-end ?" → date_after="2026-05-30", \
 date_before="2026-05-31"
 - "Quelles expos ont eu lieu à Lyon l'an dernier ?" → city="Lyon", \
-year=2025, date_before="2026-05-27"
+date_after="2025-01-01", date_before="2025-12-31"
 - "Spectacle pour enfants à n'importe quelle période" → tout à null pour \
 les dates (l'utilisateur a explicitement levé la contrainte temporelle)"""
 
@@ -111,10 +117,6 @@ class QueryFilters(BaseModel):
         default=None,
         description="Région française mentionnée, ex: 'Bretagne'",
     )
-    year: Optional[int] = Field(
-        default=None,
-        description="Année entière (2024-2030)",
-    )
     date_after: Optional[str] = Field(
         default=None,
         description="Borne basse de date au format YYYY-MM-DD",
@@ -128,7 +130,7 @@ class QueryFilters(BaseModel):
         """True si aucun filtre n'est défini."""
         return all(
             getattr(self, f) is None
-            for f in ("city", "region", "year", "date_after", "date_before")
+            for f in ("city", "region", "date_after", "date_before")
         )
 
     def as_dict(self) -> dict:

@@ -82,11 +82,17 @@ def build_page_content(event: dict[str, Any]) -> str:
 
 
 def build_metadata(event: dict[str, Any]) -> dict[str, Any]:
-    """Extrait les 10 champs metadata du Document.
+    """Extrait les 9 champs metadata du Document.
 
     Pas de duplication des champs textuels déjà dans `page_content`.
     Valeurs None autorisées : ce sont des info auxiliaires, et l'API
-    affichera ce qui est présent."""
+    affichera ce qui est présent.
+
+    Note : `event_year` n'est volontairement PAS indexé. Il reste calculé
+    au cleaning (critère de validation `is_valid`) mais le filtrage par
+    année se fait désormais via `first_date`/`last_date` (chevauchement de
+    fenêtre), pas par égalité sur une année dérivée de la seule date de
+    début."""
     return {
         "uid": event.get("uid"),
         "title": event.get("title_fr"),
@@ -97,7 +103,6 @@ def build_metadata(event: dict[str, Any]) -> dict[str, Any]:
         "location_city": event.get("location_city"),
         "location_region": event.get("location_region"),
         "attendance_mode": event.get("attendance_mode"),
-        "event_year": event.get("event_year"),
     }
 
 

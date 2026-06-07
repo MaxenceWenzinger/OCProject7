@@ -131,10 +131,9 @@ class TestBuildMetadata:
         "location_city",
         "location_region",
         "attendance_mode",
-        "event_year",
     }
 
-    def test_returns_exactly_the_10_expected_keys(self):
+    def test_returns_exactly_the_9_expected_keys(self):
         meta = build_metadata(FULL_EVENT)
         assert set(meta.keys()) == self.EXPECTED_KEYS
 
@@ -149,7 +148,6 @@ class TestBuildMetadata:
         assert meta["location_city"] == "Paris"
         assert meta["location_region"] == "Île-de-France"
         assert meta["attendance_mode"] == "sur_place"
-        assert meta["event_year"] == 2025
 
     def test_does_not_leak_excluded_fields(self):
         meta = build_metadata(FULL_EVENT)
@@ -168,6 +166,7 @@ class TestBuildMetadata:
             "accessibility_label_fr",
             "firstdate_end",
             "lastdate_begin",
+            "event_year",  # calculé au cleaning (validation) mais plus indexé
         ):
             assert excluded not in meta
 
@@ -208,7 +207,7 @@ class TestEventToDocument:
         doc = event_to_document(FULL_EVENT)
         assert "Concert de jazz manouche" in doc.page_content
         assert doc.metadata["uid"] == "abc123"
-        assert doc.metadata["event_year"] == 2025
+        assert doc.metadata["first_date"] == "2025-06-15T20:00:00+00:00"
 
     def test_metadata_does_not_mutate_input(self):
         event = dict(FULL_EVENT)
@@ -263,7 +262,7 @@ class TestEventToChunks:
             for parent_key in (
                 "uid", "title", "url", "first_date", "last_date",
                 "location_name", "location_city", "location_region",
-                "attendance_mode", "event_year",
+                "attendance_mode",
             ):
                 assert parent_key in chunk.metadata
             # Plus les deux clés ajoutées

@@ -147,34 +147,23 @@ Endpoints imposés par l'énoncé (cités tels quels) : « Un endpoint `/ask` (P
 
 *Couvre la partie évaluation des étapes 4 et 5. 6.1 à 6.4 livrées, 6.5 en cours.*
 
-- [x] **P7-6.1** Construire `evaluation/qa_dataset.jsonl` : 30 questions/réponses annotées manuellement à partir d'événements réels de l'index, échantillonnage stratifié sur villes (Paris/grandes/rares), régions, années 2025/2026 et thèmes. Réparties en 5 catégories : 6 `factual`, 7 `filter_geo`, 7 `filter_temporal`, 7 `exploratory`, 3 `out_of_domain`.
-- [x] **P7-6.2** Pour chaque entrée, schéma enrichi : `id`, `category`, `question`, `ground_truth`, `expected_contexts` (UIDs), `expected_filter` (filtre attendu du self-querying pour validation), `notes`. Tâche fusionnée avec 6.1.
-- [x] **P7-6.3** `evaluation/evaluate_rag.py` : charge le dataset, fait tourner `RAGService`, calcule les 4 métriques Ragas sur les in-domain, check booléen séparé sur les out_of_domain (regex sur le pattern de refus). Export CSV+JSON dans `evaluation/results/run_<ts>/`. Flags `--sample N`, `--skip-ragas`. Date système figée via `EVAL_FROZEN_DATE` (défaut `2026-06-02`) pour reproductibilité.
-- [x] **P7-6.4** `documentation/evaluation.md` rédigé en référence complète : méthodologie, choix d'implémentation (3 patches Mistral + frozen date), commandes, baseline complète du 2026-06-02 commentée par catégorie, findings priorisés. Pas de seuils chiffrés (purement descriptif).
-- [ ] **P7-6.5** Itération qualité : si scores faibles, ajuster (top-k retriever, prompt, modèle d'embedding) et re-mesurer — boucler 2-3 fois max, garder une trace des runs
+- [x] **P7-6.1** Construire `evaluation/qa_dataset.jsonl` : questions/réponses annotées manuellement à partir d'événements réels de l'index. **Réduit à 7 questions** (6 in-domain + 1 out-of-domain) le 2026-06-07 — décision validée avec l'encadrant : 30 questions étaient du sur-dimensionnement pour ce POC. Les 6 in-domain couvrent factuel (q01), filtre géo ville rare (q02) et ville+année (q03), filtre temporel fenêtre stricte (q04) et relatif (q05), exploratoire sémantique (q06) ; q07 est la question hors-domaine.
+- [x] **P7-6.2** Pour chaque entrée, schéma : `id`, `question`, `ground_truth`, `contexts_uids` (UIDs des events attendus, ex-`expected_contexts`), `expected_filter` (filtre attendu du self-querying pour validation). Les champs `category` et `notes` ont été retirés lors de la réduction du 2026-06-07 (la ventilation par catégorie n'a plus de sens sur si peu de questions). Tâche fusionnée avec 6.1.
+- [x] **P7-6.3** `evaluation/evaluate_rag.py` : charge le dataset, fait tourner `RAGService`, calcule les 4 métriques Ragas sur les in-domain, check booléen séparé sur la question out-of-domain (regex sur le pattern de refus). L'OOD est détectée par `contexts_uids` vide (`is_out_of_domain`), plus par un champ `category`. Export CSV+JSON dans `evaluation/results/run_<ts>/`. Flags `--sample N`, `--skip-ragas`. Date système figée via `EVAL_FROZEN_DATE` (défaut `2026-06-02`) pour reproductibilité.
+- [x] **P7-6.4** `documentation/evaluation.md` rédigé en référence : méthodologie, choix d'implémentation (3 patches Mistral + frozen date), commandes. Baseline/findings à reproduire sur le nouveau dataset 7 Q (cf. 6.5). Pas de seuils chiffrés (purement descriptif).
+- [ ] **P7-6.5** Premier run Ragas sur le dataset 7 Q + itération qualité : produire la baseline, identifier les findings, ajuster (top-k retriever, prompt, modèle d'embedding) et re-mesurer — boucler 2-3 fois max, garder une trace des runs
 
 **Décisions techniques notables prises pendant l'Epic** :
 - **Bascule Ollama → Mistral API** (commit pendant l'Epic). Initialement mistral-small via Ollama (POC offline) ; révélation en 6.3 que (a) extracteur hallucinait dates fabriquées, (b) ~40 % des prompts Ragas internes échouaient en `RagasOutputParserException`. Bascule sur `mistral-medium-3.5` via cloud (`langchain-mistralai`), conserve Ollama via `LLM_PROVIDER=ollama`. Démo Docker n'est plus offline, tradeoff documenté.
 - **Trois patches d'infrastructure dans `src/rag/llm.py`** (Mistral API) : retry custom sur 429/5xx (Ragas en concurrence saturait le quota gratuit), strip des fences markdown autour des JSON outputs (mistral-medium les ajoute systématiquement, parser Pydantic Ragas s'en étouffait), aggrégation récursive de `token_usage` (vrai bug `langchain-mistralai._combine_llm_outputs` sur les dicts imbriqués `prompt_tokens_details`, expose `TypeError: += dict and dict` sur `answer_relevancy` qui appelle `agenerate_prompt(prompts × strictness=3)`). Détails dans `documentation/evaluation.md`.
 - **`max_workers=1` côté Ragas** : avec 4 workers, 429 et « capacity exceeded » (3505) s'enchaînaient et provoquaient des TimeoutError malgré le retry. En série on absorbe les pauses sans empiler les retries.
 - **Check OOD maison séparé** : Ragas ne sait pas évaluer un refus, on contrôle la formulation attendue à coup de regex sur la règle 1 du prompt système.
+- **Suppression du filtre `year` du self-querying** (2026-06-07, pendant l'itération qualité 6.5). `QueryFilters` extrayait `{city, region, year, date_after, date_before}` ; `year` filtrait par **égalité** sur `meta["event_year"]`, un entier dérivé de la **seule date de début** (`firstdate_begin`), alors que `date_after`/`date_before` testent le **chevauchement** de la fenêtre réelle `[first_date, last_date]`. Sur un event à cheval sur deux années (déc. 2025 → mars 2026, `event_year=2025`), `year=2026` l'excluait à tort. Le prompt n'avait par ailleurs aucune règle disant *quand* préférer `year` aux bornes, d'où des extractions redondantes/incohérentes. Décision : retirer `year` ; une année voulue par l'utilisateur est désormais résolue en bornes `YYYY-01-01`/`YYYY-12-31` par l'extracteur. `event_year` est aussi retiré de la **metadata indexée** (`build_metadata`) — il reste calculé au cleaning car `is_valid` s'en sert pour rejeter les années aberrantes, mais n'est plus propagé aux Documents. **Nécessite un rebuild de l'index** pour purger le champ mort des pickles (le système est correct dès le retrait code, le champ devient juste inerte avant rebuild).
 
-**Baseline du 2026-06-02** (`run_20260602_230903/`, mistral-medium-3.5, commit 4de4d46) :
-
-| Métrique | Score | Lecture |
-|---|---:|---|
-| `faithfulness` | 0.39 | Hallucinations fréquentes quand le retriever ne ramène pas la bonne info |
-| `answer_relevancy` | 0.73 | Les réponses traitent bien le sujet posé |
-| `context_precision` | 0.22 | Beaucoup de bruit |
-| `context_recall` | 0.28 | Events attendus souvent manqués |
-| OOD pass rate | 2/3 | q30 a refusé mais avec le fallback « pas d'event » au lieu de la garde hors-domaine |
-
-5 findings priorisés pour 6.5 (cf. `evaluation.md`) :
-1. Retrieval rate les noms propres rares (q03, q04) — limite MiniLM
-2. Pre-filter date trop laxiste sur fenêtres larges — limite du dataset (1 event annoté pour des dizaines de matches valides)
-3. Pas de mapping toponymique implicite (q12 Vercors → Lans-en-Vercors)
-4. Check OOD trop strict (q30, faux négatif)
-5. `faithfulness` faible (0.39) → renforcer prompt système contre l'inférence depuis les connaissances générales du LLM
+**Baseline** : l'ancienne baseline du 2026-06-02 (`run_20260602_230903/`, 30 questions,
+5 catégories) a été retirée — le jeu de test a été réduit à 7 questions le 2026-06-07.
+La nouvelle baseline et les findings priorisés seront produits au premier run Ragas sur
+le dataset 7 Q (Epic 6.5), puis consignés dans `evaluation.md`.
 
 ---
 
